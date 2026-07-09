@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     facebook_client_id: str = ""
     facebook_client_secret: str = ""
+    artist_email: str = ""
 
     class Config:
         env_file = ".env"

@@ -5,7 +5,7 @@ from ..database import get_db
 from ..schemas.piece import PieceCreate, PieceResponse, PieceScanSubmit
 from ..models.piece import Piece, PieceStatus
 from ..models.user import User
-from ..services.auth_service import get_current_user
+from ..services.auth_service import get_current_user, get_current_artist
 from ..services.piece_service import PieceService
 from ..services.matching_service import ColorMatchingService
 
@@ -32,7 +32,7 @@ def get_piece(piece_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=PieceResponse)
-def create_piece(data: PieceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_piece(data: PieceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_artist)):
     return PieceService.create_piece(db, data.model_dump(), current_user.id)
 
 

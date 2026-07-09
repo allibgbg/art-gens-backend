@@ -23,6 +23,7 @@ class User(Base):
     pinceaux_balance = Column(Integer, default=0)
     reputation_score = Column(Float, default=1.0)
     onboarding_completed = Column(Boolean, default=False)
+    is_artist = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     owned_pieces = relationship("Piece", back_populates="current_owner")

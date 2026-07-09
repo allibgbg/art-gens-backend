@@ -28,6 +28,16 @@ def verify_token(token: str) -> Optional[dict]:
         return None
 
 
+def get_current_artist(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+) -> User:
+    user = get_current_user(credentials, db)
+    if not user.is_artist:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès artiste uniquement")
+    return user
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
@@ -43,6 +53,7 @@ def get_current_user(
 
 
 def get_or_create_user(db: Session, auth_provider: str, auth_provider_id: str, email: Optional[str] = None, pseudo: Optional[str] = None) -> User:
+    from ..config import settings
     user = db.query(User).filter(
         User.auth_provider == auth_provider,
         User.auth_provider_id == auth_provider_id,
@@ -59,12 +70,14 @@ def get_or_create_user(db: Session, auth_provider: str, auth_provider_id: str, e
         pseudo = f"{base_pseudo}{counter}"
         counter += 1
 
+    is_artist = bool(settings.artist_email and email == settings.artist_email)
     user = User(
         auth_provider=auth_provider,
         auth_provider_id=auth_provider_id,
         pseudo=pseudo,
         email=email,
         pinceaux_balance=100,
+        is_artist=is_artist,
     )
     db.add(user)
     db.commit()
