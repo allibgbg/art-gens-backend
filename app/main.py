@@ -1,5 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import traceback
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .database import engine, Base, SessionLocal
 from .models.user import User
@@ -36,6 +38,18 @@ app.include_router(offers.router)
 app.include_router(trades.router)
 app.include_router(scan.router)
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": type(exc).__name__,
+            "detail": str(exc),
+            "traceback": tb.split("\n"),
+        },
+    )
 
 @app.get("/health")
 def health():
