@@ -27,3 +27,4 @@ class ScanEvent(Base):
 
     piece = relationship("Piece", back_populates="scan_events")
     user = relationship("User", back_populates="scan_events")
+    trade_session = relationship("TradeSession", back_populates="scan_events")
