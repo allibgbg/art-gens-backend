@@ -1,18 +1,42 @@
+import uuid as _uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Any
 from ..database import get_db
 from ..schemas.piece import PieceCreate, PieceResponse, PieceScanSubmit
-from ..models.piece import Piece, PieceStatus
+from ..models.piece import Piece, PieceStatus, ColorEnum
 from ..models.user import User
 from ..services.auth_service import get_current_user, get_current_artist
 from ..services.piece_service import PieceService
-from ..services.matching_service import ColorMatchingService
+from ..services.matching_service import MatchingOrchestrator
+from pydantic import BaseModel
+
+
+class PieceDraft(BaseModel):
+    texture_signature: Optional[Any] = None
+
+
+class PieceUpdate(BaseModel):
+    top_image: Optional[str] = None
+    color_signature: Optional[Any] = None
+    texture_signature: Optional[Any] = None
+
+
+class PieceFinalize(BaseModel):
+    display_number: str
+    series_value: int
+    reference_pinceaux_value: int
+    color_primary: str = "multicolore"
+    color_secondary: Optional[str] = None
+    material_notes: Optional[str] = None
+    artist_note: Optional[str] = None
+
 
 router = APIRouter(prefix="/pieces", tags=["pieces"])
 
 
-@router.get("/", response_model=list[PieceResponse])
+# Routes à chemin fixe (doivent être AVANT les routes paramétrées /{piece_id})
+@router.get("/")
 def list_pieces(
     series_value: Optional[int] = Query(None),
     color_primary: Optional[str] = Query(None),
@@ -26,21 +50,77 @@ def list_pieces(
     return PieceService.get_all_pieces(db, filters)
 
 
+@router.post("/")
+def create_piece(data: PieceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_artist)):
+    return PieceService.create_piece(db, data.model_dump(), current_user.id)
+
+
+@router.post("/draft")
+def draft_piece(data: PieceDraft, db: Session = Depends(get_db), current_user: User = Depends(get_current_artist)):
+    pid = str(_uuid.uuid4())
+    piece = Piece(
+        id=pid,
+        display_number=pid[:10],
+        series_value=0,
+        reference_pinceaux_value=0,
+        color_primary=ColorEnum.multicolore,
+        texture_signature=data.texture_signature,
+        status=PieceStatus.non_distribue,
+    )
+    db.add(piece)
+    db.commit()
+    db.refresh(piece)
+    return {"id": piece.id, "status": "draft"}
+
+
+# Routes paramétrées
 @router.get("/{piece_id}", response_model=PieceResponse)
 def get_piece(piece_id: str, db: Session = Depends(get_db)):
     return PieceService.get_piece_by_id(db, piece_id)
 
 
-@router.post("/", response_model=PieceResponse)
-def create_piece(data: PieceCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_artist)):
-    return PieceService.create_piece(db, data.model_dump(), current_user.id)
+@router.patch("/{piece_id}")
+def update_piece(piece_id: str, data: PieceUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_artist)):
+    piece = PieceService.get_piece_by_id(db, piece_id)
+    for key, val in data.model_dump(exclude_none=True).items():
+        setattr(piece, key, val)
+    db.commit()
+    db.refresh(piece)
+    return {"status": "ok", "piece_id": piece_id}
+
+
+@router.post("/{piece_id}/finalize")
+def finalize_piece(piece_id: str, data: PieceFinalize, db: Session = Depends(get_db), current_user: User = Depends(get_current_artist)):
+    piece = PieceService.get_piece_by_id(db, piece_id)
+    for key, val in data.model_dump().items():
+        setattr(piece, key, val)
+    piece.status = PieceStatus.non_distribue
+    db.commit()
+    db.refresh(piece)
+    return {"status": "ok", "piece_id": piece_id}
 
 
 @router.post("/{piece_id}/scan")
 def scan_piece(piece_id: str, data: PieceScanSubmit, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     piece = PieceService.get_piece_by_id(db, piece_id)
-    is_match = ColorMatchingService.verify_and_update(db, piece, data.color_signature)
-    return {"authenticity_match": is_match, "piece_id": piece_id}
+    result = MatchingOrchestrator.verify_piece(
+        db, piece,
+        color_signature=data.color_signature,
+        texture_signature=data.texture_signature,
+        query_top_image=data.top_image,
+    )
+    return {
+        "authenticity_match": result["match"],
+        "piece_id": piece_id,
+        "color_score": result["color_score"],
+        "texture_score": result["texture_score"],
+        "hu_score": result["hu_score"],
+        "lbp_score": result["lbp_score"],
+        "combined_score": result.get("combined_score"),
+        "match_count": result["match_count"],
+        "geometric_inliers": result["geometric_inliers"],
+        "geometry_verified": result["geometry_verified"],
+    }
 
 
 @router.post("/{piece_id}/assign")

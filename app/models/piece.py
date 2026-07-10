@@ -35,6 +35,8 @@ class Piece(Base):
     color_secondary = Column(Enum(ColorEnum), nullable=True)
     color_signature = Column(JSON, nullable=True)
     color_signature_history = Column(JSON, default=list)
+    texture_signature = Column(JSON, nullable=True)
+    top_image = Column(Text, nullable=True)
     material_notes = Column(Text, nullable=True)
     creation_date = Column(DateTime, default=datetime.utcnow)
     artist_note = Column(Text, nullable=True)

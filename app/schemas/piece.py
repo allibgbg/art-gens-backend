@@ -9,6 +9,9 @@ class PieceCreate(BaseModel):
     reference_pinceaux_value: int
     color_primary: str
     color_secondary: Optional[str] = None
+    color_signature: Optional[Any] = None
+    texture_signature: Optional[Any] = None
+    top_image: Optional[str] = None
     material_notes: Optional[str] = None
     artist_note: Optional[str] = None
 
@@ -21,6 +24,8 @@ class PieceResponse(BaseModel):
     color_primary: str
     color_secondary: Optional[str] = None
     color_signature: Optional[Any] = None
+    texture_signature: Optional[Any] = None
+    top_image: Optional[str] = None
     material_notes: Optional[str] = None
     creation_date: datetime
     artist_note: Optional[str] = None
@@ -35,4 +40,6 @@ class PieceResponse(BaseModel):
 class PieceScanSubmit(BaseModel):
     piece_id: str
     capture_data: Any
-    color_signature: Any
+    color_signature: Optional[Any] = None
+    texture_signature: Optional[Any] = None
+    top_image: Optional[str] = None

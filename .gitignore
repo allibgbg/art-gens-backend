@@ -4,3 +4,5 @@
 art_gens.db
 *.db
 venv/
+
+*.zip

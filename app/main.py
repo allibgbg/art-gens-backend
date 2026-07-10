@@ -17,6 +17,16 @@ from .websocket.trade_handler import router as ws_router
 
 Base.metadata.create_all(bind=engine)
 
+# Migration manuelle : ajout de la colonne top_image si elle n'existe pas
+from sqlalchemy import inspect, text
+inspector = inspect(engine)
+if "pieces" in inspector.get_table_names():
+    columns = {c["name"] for c in inspector.get_columns("pieces")}
+    if "top_image" not in columns:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE pieces ADD COLUMN top_image TEXT"))
+            conn.commit()
+
 app = FastAPI(
     title="Art-gens API",
     description="Backend du projet Art-gens — échange d'objets d'art avec monnaie interne",
