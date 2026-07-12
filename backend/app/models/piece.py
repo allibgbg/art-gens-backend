@@ -28,7 +28,7 @@ class Piece(Base):
     __tablename__ = "pieces"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    display_number = Column(String(10), unique=True, nullable=False)
+    display_number = Column(String(32), unique=True, nullable=False)
     series_value = Column(Integer, nullable=False)
     reference_pinceaux_value = Column(Integer, nullable=False)
     color_primary = Column(Enum(ColorEnum), nullable=False)

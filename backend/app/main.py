@@ -27,6 +27,15 @@ if "pieces" in inspector.get_table_names():
             conn.execute(text("ALTER TABLE pieces ADD COLUMN top_image TEXT"))
             conn.commit()
 
+# Migration manuelle : élargissement de display_number (VARCHAR(10) -> VARCHAR(32))
+# car le mobile génère "$PSEUDO-$timestamp" (ex: IST-1783881379922) > 10 caractères,
+# ce qui provoquait une erreur StringDataRightTruncation à la création/finalisation.
+with engine.begin() as conn:
+    try:
+        conn.execute(text("ALTER TABLE pieces ALTER COLUMN display_number TYPE VARCHAR(32)"))
+    except Exception:
+        pass
+
 app = FastAPI(
     title="Art-gens API",
     description="Backend du projet Art-gens — échange d'objets d'art avec monnaie interne",
