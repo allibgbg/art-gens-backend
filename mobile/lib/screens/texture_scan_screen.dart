@@ -178,16 +178,18 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     // 2) Mettre à jour la région de scan IMMÉDIATEMENT (pour affichage zone verte)
     _currentScanRegion = region;
 
-    // 3) Ratio de netteté dans cette même région circulaire
+    // 3) Netteté dans cette même région circulaire (moyenne du gradient = mesure de
+    //    focus réelle, restreinte au socle). Normalisée 0..1 vs une netteté maximale
+    //    de référence (~6.0 : images nettes en lumière vive atteignent ~7+).
     double ratio = 0.0;
     if (region != null) {
-      ratio = sharpnessRatioInFixedCircle(
+      final meanGrad = sharpnessRatioInFixedCircle(
         image,
         screenWidth: _screenWidth,
         screenHeight: _screenHeight,
         sensorOrientation: _sensorOrientation,
-        threshold: 3.0,
       );
+      ratio = (meanGrad / 6.0).clamp(0.0, 1.0);
     }
 
     if (mounted) {

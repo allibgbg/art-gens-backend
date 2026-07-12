@@ -206,12 +206,14 @@ CameraCircleRegion? computeFixedCenterCircleRegion({
   return CameraCircleRegion(cx: clampedCx, cy: clampedCy, radius: clampedRadius);
 }
 
-/// Calcule le ratio de netteté dans un cercle FIXE de 400px de diamètre au centre de l'écran.
+/// Retourne la netteté (moyenne du gradient horizontal absolu) dans le cercle FIXE
+/// de 400px de diamètre au centre de l'écran. Contrairement à l'ancienne version
+/// qui comptait les pixels à fort gradient (et plafonnait ~25-30% sur un socle lisse
+/// même net), ceci est une mesure de focus réelle : flou => gradient faible, net => fort.
 double sharpnessRatioInFixedCircle(CameraImage image, {
   required double screenWidth,
   required double screenHeight,
   required int sensorOrientation,
-  required double threshold,
 }) {
   final region = computeFixedCenterCircleRegion(
     image: image,
@@ -234,7 +236,7 @@ double sharpnessRatioInFixedCircle(CameraImage image, {
     final radiusSq = radius * radius;
 
     int total = 0;
-    int sharp = 0;
+    int sum = 0;
     const step = 2;
 
     final yStart = (cy - radius).ceil().clamp(0, h - 1);
@@ -255,15 +257,14 @@ double sharpnessRatioInFixedCircle(CameraImage image, {
         total++;
         final idx = rowStart + x;
         if (idx + 1 < bytes.length) {
-          final diff = (bytes[idx] - bytes[idx + 1]).abs();
-          if (diff > threshold) sharp++;
+          sum += (bytes[idx] - bytes[idx + 1]).abs();
         }
       }
     }
-    return total == 0 ? 0.0 : sharp / total;
+    return total == 0 ? 0.0 : sum / total;
   } catch (_) {
     return 0.0;
-}
+  }
 }
 
 /// Calcule le ratio de netteté dans une zone circulaire centrale (legacy, inchangé).
