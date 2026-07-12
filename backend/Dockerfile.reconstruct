@@ -1,0 +1,20 @@
+# Worker de reconstruction 3D (COLMAP + Open3D).
+# Base colmap/colmap : binaire `colmap` déjà présent dans le PATH.
+# Note : patch_match_stereo / stereo_fusion (dense) requièrent un GPU CUDA.
+# Pour un environnement CPU, lance la reconstruction en mode sparse
+# (reconstruct_folder(..., dense=False)).
+FROM colmap/colmap:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

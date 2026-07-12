@@ -13,3 +13,4 @@ python-dotenv==1.0.1
 google-auth==2.55.2
 opencv-python-headless==4.10.0.84
 psycopg2-binary==2.9.10
+open3d==0.18.0

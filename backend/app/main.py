@@ -12,7 +12,7 @@ from .models.offer import Offer
 from .models.appointment import Appointment
 from .models.trade_session import TradeSession
 from .models.pinceaux_transaction import PinceauxTransaction
-from .routers import auth, users, pieces, offers, trades, scan, digit_auth
+from .routers import auth, users, pieces, offers, trades, scan, digit_auth, scan3d
 from .websocket.trade_handler import router as ws_router
 
 Base.metadata.create_all(bind=engine)
@@ -57,6 +57,7 @@ app.include_router(offers.router)
 app.include_router(trades.router)
 app.include_router(scan.router)
 app.include_router(digit_auth.router)
+app.include_router(scan3d.router)
 
 
 @app.exception_handler(Exception)
