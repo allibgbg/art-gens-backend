@@ -77,6 +77,66 @@ class ApiClient {
     });
   }
 
+  Future<Map<String, dynamic>> reconstruct3D(List<String> imagePaths,
+      {bool dense = true}) async {
+    final uri = Uri.parse('$baseUrl/scan3d/reconstruct');
+    final req = http.MultipartRequest('POST', uri);
+    if (_token != null) req.headers['Authorization'] = 'Bearer $_token';
+    for (final p in imagePaths) {
+      req.files.add(await http.MultipartFile.fromPath('files', p));
+    }
+    req.fields['dense'] = dense.toString();
+    final res = await _sendMultipart(req);
+    Map<String, dynamic> info = {};
+    final reconHeader = res['headers']['x-recon'];
+    if (reconHeader != null) {
+      try {
+        info = jsonDecode(reconHeader) as Map<String, dynamic>;
+      } catch (_) {}
+    }
+    return {'info': info, 'meshBytes': res['bytes'] as List<int>};
+  }
+
+  Future<Map<String, dynamic>> compare3D(String refPath, String candPath,
+      {double threshold = 0.02}) async {
+    final uri = Uri.parse('$baseUrl/scan3d/compare');
+    final req = http.MultipartRequest('POST', uri);
+    if (_token != null) req.headers['Authorization'] = 'Bearer $_token';
+    req.files.add(await http.MultipartFile.fromPath('reference', refPath));
+    req.files.add(await http.MultipartFile.fromPath('candidate', candPath));
+    req.fields['threshold'] = threshold.toString();
+    final res = await _sendMultipart(req);
+    return jsonDecode(res['body'] as String) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> _sendMultipart(http.MultipartRequest req) async {
+    while (true) {
+      try {
+        final streamed = await req.send();
+        final response = await http.Response.fromStream(streamed);
+        if (response.statusCode == 501) {
+          throw ApiException(501, response.body);
+        }
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          return {
+            'status': response.statusCode,
+            'body': response.body,
+            'bytes': response.bodyBytes,
+            'headers': response.headers,
+          };
+        }
+        throw ApiException(response.statusCode, response.body);
+      } catch (e) {
+        if (_isSleepError(e)) {
+          _backendStatus?.markSleeping();
+          await Future.delayed(const Duration(seconds: 3));
+        } else {
+          rethrow;
+        }
+      }
+    }
+  }
+
   Map<String, dynamic> _handleResponse(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) {
       if (response.body.isEmpty) return {};

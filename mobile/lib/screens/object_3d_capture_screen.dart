@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 import 'package:path_provider/path_provider.dart';
+import 'package:provider/provider.dart';
 import '../services/texture_extraction.dart' show yPlaneToGrayMat;
+import '../services/api_client.dart';
 
 /// Outil de capture 3D séparé du scan de nouvel objet.
 /// Capture une série de photos "live" (auto sur mouvement ou manuel) pendant
@@ -26,6 +29,10 @@ class _Object3DCaptureScreenState extends State<Object3DCaptureScreen> {
   String _dir = '';
   cv.Mat? _prevGray;
   DateTime _lastCap = DateTime.fromMillisecondsSinceEpoch(0);
+  String? _lastMeshPath;
+  Map<String, dynamic>? _lastScore;
+  bool _processing = false;
+  String? _statusMsg;
 
   @override
   void initState() {
@@ -127,6 +134,7 @@ class _Object3DCaptureScreenState extends State<Object3DCaptureScreen> {
   }
 
   Future<void> _finish() async {
+    if (_processing) return;
     final sb = StringBuffer();
     sb.writeln('ARTGENS 3D CAPTURE');
     sb.writeln('date=${DateTime.now().toIso8601String()}');
@@ -137,11 +145,94 @@ class _Object3DCaptureScreenState extends State<Object3DCaptureScreen> {
     }
     final txt = '$_dir/capture_info.txt';
     await File(txt).writeAsString(sb.toString());
+
+    String msg = '${_frames.length} vues enregistrées.\n$txt';
+    if (_frames.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+        Navigator.pop(context);
+      }
+      return;
+    }
+
+    // Upload vers le backend pour reconstruction + auth.
+    setState(() => _processing = true);
+    try {
+      final api = context.read<ApiClient>();
+      final res = await api.reconstruct3D(_frames, dense: true);
+      final info = res['info'] as Map<String, dynamic>? ?? {};
+      final bytes = res['meshBytes'] as Uint8List;
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final meshPath = '$_dir/model_$ts.obj';
+      await File(meshPath).writeAsBytes(bytes);
+      _lastMeshPath = meshPath;
+      msg += '\nMesh reconstruit: $meshPath';
+      if (info['num_images'] != null) {
+        msg += '\n(images traitées: ${info['num_images']}, dense: ${info['dense']})';
+      }
+
+      // Si une référence existe déjà, comparer pour score d'auth.
+      final refPath = '$_dir/reference.obj';
+      if (File(refPath).existsSync()) {
+        try {
+          final score = await api.compare3D(refPath, meshPath);
+          _lastScore = score;
+          final sc = (score['score'] as num?)?.toDouble() ?? 0.0;
+          msg += '\nScore d\'authenticité vs référence: ${(sc * 100).toStringAsFixed(1)}%';
+        } catch (e) {
+          msg += '\n(Comparaison impossible: $e)';
+        }
+      } else {
+        msg += '\nAucune référence: utilise "Définir réf." pour enregistrer ce scan.';
+      }
+    } on ApiException catch (e) {
+      if (e.statusCode == 501) {
+        msg += '\nBackend: COLMAP indisponible (worker requis). '
+            'Vues + infos enregistrées localement pour traitement ultérieur.';
+      } else {
+        msg += '\nErreur backend: $e';
+      }
+    } catch (e) {
+      msg += '\nErreur: $e';
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+
+    _statusMsg = msg;
+    if (mounted) {
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Résultat scan 3D'),
+          content: SingleChildScrollView(child: Text(msg)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Fermer'),
+            ),
+            if (_lastMeshPath != null)
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _setReference();
+                },
+                child: const Text('Définir réf.'),
+              ),
+          ],
+        ),
+      );
+    }
+  }
+
+  /// Copie le dernier mesh reconstruit comme référence d'authentification.
+  Future<void> _setReference() async {
+    if (_lastMeshPath == null) return;
+    final refPath = '$_dir/reference.obj';
+    await File(_lastMeshPath!).copy(refPath);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${_frames.length} vues -> $txt')),
+        SnackBar(content: Text('Référence enregistrée: $refPath')),
       );
-      Navigator.pop(context);
     }
   }
 
@@ -195,7 +286,9 @@ class _Object3DCaptureScreenState extends State<Object3DCaptureScreen> {
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
+          child: _processing
+              ? const Center(child: CircularProgressIndicator())
+              : Row(
             children: [
               Expanded(
                 child: ElevatedButton.icon(
@@ -211,6 +304,11 @@ class _Object3DCaptureScreenState extends State<Object3DCaptureScreen> {
                 activeColor: Colors.amber,
               ),
               const Text('Auto'),
+              const SizedBox(width: 12),
+              OutlinedButton(
+                onPressed: _lastMeshPath != null ? _setReference : null,
+                child: const Text('Réf.'),
+              ),
             ],
           ),
         ),
