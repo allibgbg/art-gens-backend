@@ -33,6 +33,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   String? _error;
   String? _digitValue; // chiffre CONFIRMÉ (arme la base + rotation)
   String? _pendingDigit; // chiffre détecté stable, en attente de confirmation
+  List<double>? _lastDetHu; // signature Hu du dernier chiffre détecté
   String? _pieceId;
 
   // Stabilité du chiffre : on n'accepte un chiffre détecté qu'après N
@@ -131,6 +132,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     });
     _tracker = CoverageTracker(4, 4);
     _sharpnessGate.reset();
+    clearDigitReferences(); // nouveau scan -> nouveau template d'auth
 
     try {
       await _cameraController!.startImageStream(_onImage);
@@ -179,6 +181,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
         if (mounted) setState(() {});
       }
     }
+    if (det.hu != null) _lastDetHu = det.hu;
     _tracker.addDigit(det, _digitValue, image.width);
 
     // 2) Base (fond poncé) : détection throttlée, capture une seule fois.
@@ -354,6 +357,9 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
 
   void _confirmDigit() {
     if (_pendingDigit != null) {
+      // Enregistre la signature EXACTE du chiffre moulé comme template
+      // d'authentification : seul CE "5" (même moule) sera reconnu ensuite.
+      if (_lastDetHu != null) setDigitReference(_pendingDigit!, _lastDetHu!);
       setState(() {
         _digitValue = _pendingDigit;
         _pendingDigit = null;
