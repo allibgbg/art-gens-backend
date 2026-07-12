@@ -1,0 +1,156 @@
+import 'dart:math' as math;
+import 'package:camera/camera.dart';
+import 'package:opencv_dart/opencv_dart.dart' as cv;
+import 'texture_extraction.dart';
+
+/// Résultat de la détection du chiffre gravé.
+/// [value] vaut '2' ou '5' (null si non détecté/peu confiant),
+/// [confidence] ∈ [0,1], [box] = boîte englobante dans l'image grayscale
+/// (coordonnées en pixels de la matrice h×w, utile pour suivre le déplacement
+/// du chiffre en rotation).
+class DigitDetectionResult {
+  final String? value;
+  final double confidence;
+  final cv.Rect? box;
+  const DigitDetectionResult(this.value, this.confidence, this.box);
+}
+
+/// Détecte le chiffre gravé (2 ou 5) depuis une matrice grayscale CV_8UC1.
+/// [enforceCentering] : si true, rejette le chiffre s'il n'est pas proche du
+/// centre (utilisé par le scan 1 où l'on cadre le dessus). false pour le scan 3
+/// où le chiffre se déplace librement dans l'image et sert de repère de rotation.
+DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
+  try {
+    final imgArea = gray.rows * gray.cols;
+    final clahe = cv.CLAHE(2.0, (8, 8));
+    final enhanced = clahe.apply(gray);
+    clahe.dispose();
+
+    final blurred = cv.gaussianBlur(enhanced, (5, 5), 0);
+    enhanced.dispose();
+
+    final bin = cv.adaptiveThreshold(
+      blurred, 255.0, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 5.0,
+    );
+    blurred.dispose();
+
+    final kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
+    final cleaned = cv.morphologyEx(bin, cv.MORPH_OPEN, kernel);
+    bin.dispose();
+    kernel.dispose();
+
+    final (contours, _) = cv.findContours(cleaned, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    double maxArea = 0;
+    cv.VecPoint? best;
+    for (final c in contours) {
+      final a = cv.contourArea(c);
+      if (a > maxArea) { maxArea = a; best = c; }
+    }
+    if (best == null || best.length < 10) {
+      cleaned.dispose(); contours.dispose();
+      return const DigitDetectionResult(null, 0, null);
+    }
+
+    final rect = cv.boundingRect(best);
+    contours.dispose();
+
+    final areaRatio = maxArea / imgArea;
+    if (areaRatio < 0.005 || areaRatio > 0.60) {
+      cleaned.dispose();
+      return const DigitDetectionResult(null, 0, null);
+    }
+    final aspect = rect.width / math.max(1, rect.height);
+    if (aspect < 0.2 || aspect > 5.0) {
+      cleaned.dispose();
+      return const DigitDetectionResult(null, 0, null);
+    }
+
+    if (enforceCentering) {
+      final cx = rect.x + rect.width / 2;
+      final cy = rect.y + rect.height / 2;
+      final dC = math.sqrt(
+        (cx - gray.cols / 2) * (cx - gray.cols / 2) +
+        (cy - gray.rows / 2) * (cy - gray.rows / 2),
+      );
+      if (dC > math.min(gray.cols, gray.rows) * 0.40) {
+        cleaned.dispose();
+        return const DigitDetectionResult(null, 0, null);
+      }
+    }
+
+    final roi = cleaned.region(rect);
+    cleaned.dispose();
+
+    // Moments de Hu sur le masque binaire du chiffre (dartcv4 n'exporte pas
+    // HuMoments -> calcul manuel à partir des moments normalisés).
+    final m = cv.moments(roi, binaryImage: true);
+    roi.dispose();
+    final nu20 = m.nu20, nu02 = m.nu02, nu11 = m.nu11;
+    final nu30 = m.nu30, nu12 = m.nu12, nu21 = m.nu21, nu03 = m.nu03;
+    m.dispose();
+
+    double sq(double x) => x * x;
+    final hu = <double>[
+      nu20 + nu02,
+      sq(nu20 - nu02) + 4 * sq(nu11),
+      sq(nu30 - 3 * nu12) + sq(3 * nu21 - nu03),
+      sq(nu30 + nu12) + sq(nu21 + nu03),
+      (nu30 - 3 * nu12) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
+          + (3 * nu21 - nu03) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
+      (nu20 - nu02) * (sq(nu30 + nu12) - sq(nu21 + nu03))
+          + 4 * nu11 * (nu30 + nu12) * (nu21 + nu03),
+      (3 * nu21 - nu03) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
+          - (nu30 - 3 * nu12) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
+    ];
+    final huLog = hu.map((v) => -v.sign * math.log(v.abs() + 1e-10)).toList();
+    // Seules les 4 premières composantes de Hu sont stables sur de petits
+    // chiffres gravés (limite connue des moments de Hu).
+    final huLogUsed = huLog.sublist(0, 4);
+
+    // Références calibrées sur vrais moules (séries 2 et 5 uniquement).
+    const ref2 = [-0.91, -0.42, -1.62, -0.47, 0.0, 0.0, 0.0];
+    const ref5 = [0.57, 1.99, 4.78, 5.38, 0.0, 0.0, 0.0];
+
+    double huDist(List<double> a, List<double> b) {
+      double s = 0;
+      for (int i = 0; i < 4; i++) s += sq(a[i] - b[i]);
+      return math.sqrt(s);
+    }
+
+    // La 3e composante de Hu (hu2, index 2) est un discriminant quasi parfait
+    // sur les échantillons réels (5 > 0, 2 < 0). La confiance utilise la
+    // distance euclidienne 4 composantes vers la référence choisie.
+    String guess;
+    double bestDist;
+    if (huLogUsed[2] > 0) {
+      guess = '5';
+      bestDist = huDist(huLogUsed, ref5);
+    } else if (huLogUsed[2] < 0) {
+      guess = '2';
+      bestDist = huDist(huLogUsed, ref2);
+    } else {
+      final d2 = huDist(huLogUsed, ref2);
+      final d5 = huDist(huLogUsed, ref5);
+      guess = d2 < d5 ? '2' : '5';
+      bestDist = math.min(d2, d5);
+    }
+    final conf = (1.0 - bestDist / 10.0).clamp(0.0, 1.0);
+
+    // Rejeter si pas assez confiant (évite les faux positifs sur le fond).
+    if (conf < 0.6) return const DigitDetectionResult(null, 0, null);
+
+    return DigitDetectionResult(guess, conf, rect);
+  } catch (_) {
+    return const DigitDetectionResult(null, 0, null);
+  }
+}
+
+/// Détecte le chiffre gravé depuis une [CameraImage] (convertit le plan Y
+/// en grayscale en gérant le stride, via [yPlaneToGrayMat]).
+DigitDetectionResult detectDigitFromImage(CameraImage image, {bool enforceCentering = false}) {
+  final gray = yPlaneToGrayMat(image);
+  if (gray == null) return const DigitDetectionResult(null, 0, null);
+  final result = detectDigit(gray, enforceCentering: enforceCentering);
+  gray.dispose();
+  return result;
+}

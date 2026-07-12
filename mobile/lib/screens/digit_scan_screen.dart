@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 import 'texture_scan_screen.dart';
+import '../services/digit_detection.dart';
 
 /// Phase 1 — détection du chiffre gravé (dessus de l'objet).
 /// Ne crée pas encore la pièce en base : le chiffre détecté + la photo
@@ -88,18 +89,10 @@ class _DigitScanScreenState extends State<DigitScanScreen> {
     _scanAttempts++;
     if (mounted) setState(() {});
     try {
-      final yPlane = image.planes[0];
-      final w = image.width;
-      final h = image.height;
-      final yData = Uint8List(w * h);
-      for (int y = 0; y < h; y++) {
-        final src = y * yPlane.bytesPerRow;
-        final dst = y * w;
-        yData.setRange(dst, dst + w, yPlane.bytes, src);
-      }
-      final gray = cv.Mat.fromList(h, w, cv.MatType.CV_8UC1, yData.cast<num>().toList());
-      _analyzeGray(gray);
-      gray.dispose();
+      // Conversion stride-correcte + détection (renvoie valeur/confiance/boîte).
+      // enforceCentering : le scan 1 cadre le dessus, le chiffre doit être centré.
+      final res = detectDigitFromImage(image, enforceCentering: true);
+      if (res.value != null) _handleResult(res);
     } catch (_) {}
     if (_digitGuess != null && _cameraController != null) {
       _capturing = false;
@@ -112,128 +105,19 @@ class _DigitScanScreenState extends State<DigitScanScreen> {
   static const int _neededStableHits = 20;
   String? _stableGuess;
 
-  void _analyzeGray(cv.Mat gray) {
-    try {
-      final imgArea = gray.rows * gray.cols;
-      final clahe = cv.CLAHE(2.0, (8, 8));
-      final enhanced = clahe.apply(gray);
-      clahe.dispose();
-
-      final blurred = cv.gaussianBlur(enhanced, (5, 5), 0);
-      enhanced.dispose();
-
-      final bin = cv.adaptiveThreshold(
-        blurred, 255.0, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 5.0,
-      );
-      blurred.dispose();
-
-      final kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
-      final cleaned = cv.morphologyEx(bin, cv.MORPH_OPEN, kernel);
-      bin.dispose();
-      kernel.dispose();
-
-      final (contours, _) = cv.findContours(cleaned, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-      double maxArea = 0;
-      cv.VecPoint? best;
-      for (final c in contours) {
-        final a = cv.contourArea(c);
-        if (a > maxArea) { maxArea = a; best = c; }
+  // Stabilisation temporelle : confirme le chiffre après 20 détections
+  // consécutives identiques (la détection elle-même filtre déjà centrage + confiance).
+  void _handleResult(DigitDetectionResult res) {
+    if (res.value == _stableGuess) {
+      _stableHits++;
+      if (_stableHits >= _neededStableHits) {
+        _digitGuess = res.value;
+        _digitConfidence = res.confidence;
       }
-      if (best == null || best.length < 10) { cleaned.dispose(); contours.dispose(); return; }
-
-      final rect = cv.boundingRect(best);
-      contours.dispose();
-
-      final areaRatio = maxArea / imgArea;
-      if (areaRatio < 0.005 || areaRatio > 0.60) { cleaned.dispose(); return; }
-      final aspect = rect.width / math.max(1, rect.height);
-      if (aspect < 0.2 || aspect > 5.0) { cleaned.dispose(); return; }
-      final cx = rect.x + rect.width / 2;
-      final cy = rect.y + rect.height / 2;
-      if (math.sqrt((cx - gray.cols / 2) * (cx - gray.cols / 2) + (cy - gray.rows / 2) * (cy - gray.rows / 2)) > math.min(gray.cols, gray.rows) * 0.40) {
-        cleaned.dispose(); return;
-      }
-
-      final roi = cleaned.region(rect);
-      cleaned.dispose();
-
-      // Moments de Hu sur le masque binaire du chiffre (dartcv4 n'exporte pas
-      // HuMoments -> calcul manuel à partir des moments normalisés).
-      final m = cv.moments(roi, binaryImage: true);
-      roi.dispose();
-      final nu20 = m.nu20, nu02 = m.nu02, nu11 = m.nu11;
-      final nu30 = m.nu30, nu12 = m.nu12, nu21 = m.nu21, nu03 = m.nu03;
-      m.dispose();
-
-      double sq(double x) => x * x;
-      final hu = <double>[
-        nu20 + nu02,
-        sq(nu20 - nu02) + 4 * sq(nu11),
-        sq(nu30 - 3 * nu12) + sq(3 * nu21 - nu03),
-        sq(nu30 + nu12) + sq(nu21 + nu03),
-        (nu30 - 3 * nu12) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
-            + (3 * nu21 - nu03) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
-        (nu20 - nu02) * (sq(nu30 + nu12) - sq(nu21 + nu03))
-            + 4 * nu11 * (nu30 + nu12) * (nu21 + nu03),
-        (3 * nu21 - nu03) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
-            - (nu30 - 3 * nu12) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
-      ];
-      final huLog = hu.map((v) => -v.sign * math.log(v.abs() + 1e-10)).toList();
-      // Seules les 4 premières composantes de Hu sont stables sur de petits
-      // chiffres gravés : les 3 dernières changent de signe avec le bruit et la
-      // pixellisation (limite connue des moments de Hu). On ne compare donc que
-      // les 4 premières.
-      final huLogUsed = huLog.sublist(0, 4);
-
-      // Références (4 premières composantes huLog), calibrées sur vrais moules
-      // via le pipeline de recadrage sur la bille.
-      // ref5 : MESURÉ (moyenne de 5 captures réelles).
-      // ref2 : MESURÉ (moyenne de 3 captures valides, filtrées par ratio w/h).
-      // Uniquement les séries 2 et 5 gérées pour le moment.
-      const ref2 = [-0.91, -0.42, -1.62, -0.47, 0.0, 0.0, 0.0];
-      const ref5 = [0.57, 1.99, 4.78, 5.38, 0.0, 0.0, 0.0];
-
-      double huDist(List<double> a, List<double> b) {
-        double s = 0;
-        for (int i = 0; i < 4; i++) s += sq(a[i] - b[i]);
-        return math.sqrt(s);
-      }
-
-      // Décision : la 3e composante de Hu (hu2, index 2) est un discriminant
-      // quasi parfait sur les échantillons réels (5 > 0, 2 < 0, aucun
-      // chevauchement sur 8/8). On l'utilise en pré-filtre de signe, et la
-      // confiance est calculée via la distance euclidienne 4 composantes vers
-      // la référence choisie.
-      String guess;
-      double bestDist;
-      if (huLogUsed[2] > 0) {
-        guess = '5';
-        bestDist = huDist(huLogUsed, ref5);
-      } else if (huLogUsed[2] < 0) {
-        guess = '2';
-        bestDist = huDist(huLogUsed, ref2);
-      } else {
-        final d2 = huDist(huLogUsed, ref2);
-        final d5 = huDist(huLogUsed, ref5);
-        guess = d2 < d5 ? '2' : '5';
-        bestDist = math.min(d2, d5);
-      }
-      final conf = (1.0 - bestDist / 10.0).clamp(0.0, 1.0);
-
-      // Rejeter si pas assez confiant (évite les faux positifs sur le fond).
-      if (conf < 0.6) return;
-
-      if (guess == _stableGuess) {
-        _stableHits++;
-        if (_stableHits >= _neededStableHits) {
-          _digitGuess = guess;
-          _digitConfidence = conf;
-        }
-      } else {
-        _stableGuess = guess;
-        _stableHits = 1;
-      }
-    } catch (_) {}
+    } else {
+      _stableGuess = res.value;
+      _stableHits = 1;
+    }
   }
 
   Future<void> _takePhotoAndContinue() async {

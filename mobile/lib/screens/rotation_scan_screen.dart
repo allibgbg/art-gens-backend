@@ -29,6 +29,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   double _maxSharpness = 0;
   int _calibPct = 0;
   int _skippedBlurry = 0;
+  String? _digitValue;
   MultiAngleScanner? _scanner;
   String? _error;
   ScanResult? _result;
@@ -88,10 +89,16 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     if (_cameraController == null || _scanning) return;
     setState(() { _scanning = true; _done = false; _error = null; });
     // Un seul scanner pour toute la durée du scan éternel.
-    final scanner = _scanner ??= MultiAngleScanner(_cameraController!);
+    final scanner = _scanner ??= MultiAngleScanner(
+      _cameraController!,
+      expectedDigit: widget.digitGuess,
+    );
 
     scanner.onProgress = (cov, conf) {
       if (mounted) setState(() { _coverage = cov; _confidence = conf; });
+    };
+    scanner.onDigit = (value, digitCov) {
+      if (mounted && value != null) setState(() => _digitValue = value);
     };
     scanner.onSharpness = (qs, max, calibPct, skipped, processed) {
       if (mounted) setState(() {
@@ -172,6 +179,20 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                   margin: const EdgeInsets.all(24), padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(16)),
                   child: Column(children: [
+                    if (_digitValue != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.blueAccent.withOpacity(0.25),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Chiffre détecté : $_digitValue',
+                          style: const TextStyle(
+                            color: Colors.lightBlueAccent, fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                      ),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(4),
                       child: LinearProgressIndicator(

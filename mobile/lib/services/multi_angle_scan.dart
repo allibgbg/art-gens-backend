@@ -2,23 +2,29 @@ import 'dart:async';
 import 'package:camera/camera.dart';
 import 'color_extraction.dart';
 import 'texture_extraction.dart';
+import 'digit_detection.dart';
 
 typedef ScanProgressCallback = void Function(double coverage, double confidence);
 
 typedef ScanSharpnessCallback = void Function(
     double qs, double max, int calibPct, int skipped, int total);
 
+typedef ScanDigitCallback = void Function(String? value, double digitCoverage);
+
 class ScanResult {
   final Map<String, dynamic> spatialSignature;
   final double coverage;
   final double confidence;
   final int framesProcessed;
+  final String? digitValue;
 
-  ScanResult(this.spatialSignature, this.coverage, this.confidence, this.framesProcessed);
+  ScanResult(this.spatialSignature, this.coverage, this.confidence, this.framesProcessed,
+      this.digitValue);
 }
 
 class MultiAngleScanner {
   final CameraController _camera;
+  final String? expectedDigit;
   bool _running = false;
   int _frameCount = 0;
   int _skippedBlurry = 0;
@@ -28,8 +34,9 @@ class MultiAngleScanner {
 
   ScanProgressCallback? onProgress;
   ScanSharpnessCallback? onSharpness;
+  ScanDigitCallback? onDigit;
 
-  MultiAngleScanner(this._camera, {int gridRows = 4, int gridCols = 4})
+  MultiAngleScanner(this._camera, {int gridRows = 4, int gridCols = 4, this.expectedDigit})
       : _tracker = CoverageTracker(gridRows, gridCols);
 
   bool get running => _running;
@@ -80,6 +87,15 @@ class MultiAngleScanner {
     _frameCount++;
     final sig = SpatialSignature.extract(image);
     final cov = _tracker.addFrame(sig);
+
+    // Détection du chiffre gravé sur CHAQUE frame validée : sert de repère de
+    // rotation (le chiffre se déplace latéralement quand l'œuf pivote).
+    final det = detectDigitFromImage(image, enforceCentering: false);
+    _tracker.addDigit(det, expectedDigit, image.width);
+    if (det.value != null) {
+      onDigit?.call(det.value, _tracker.digitCoverage);
+    }
+
     onSharpness?.call(qs, _sharpnessGate.maxSeen,
         _sharpnessGate.calibrationProgress, _skippedBlurry, _frameCount);
     onProgress?.call(cov, _tracker.confidence);
@@ -104,6 +120,7 @@ class MultiAngleScanner {
       _tracker.coverage,
       _tracker.confidence,
       _frameCount,
+      _tracker.digitValue,
     );
   }
 

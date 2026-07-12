@@ -76,7 +76,7 @@ class _TradeWindowScreenState extends State<TradeWindowScreen> {
     try {
       _scanResult = await scanner.start();
     } catch (_) {
-      _scanResult = ScanResult({}, 0, 0, 0);
+      _scanResult = ScanResult({}, 0, 0, 0, null);
     }
 
     if (mounted) {

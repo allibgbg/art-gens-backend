@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'package:camera/camera.dart';
+import 'digit_detection.dart';
 
 /// Représente une couleur dans l'espace CIELAB.
 /// On ignore L volontairement — seuls (a,b) sont utilisés
@@ -227,6 +228,20 @@ class CoverageTracker {
   double _credit = 0.0;
   SpatialSignature? _lastSig;
 
+  // Suivi du chiffre gravé comme repère de rotation (scan 3) : on accumulate le
+  // déplacement horizontal du centroïde du chiffre détecté. Quand l'œuf pivote,
+  // le chiffre se déplace latéralement -> crédit de rotation direct et fiable,
+  // même sur un œuf de teinte uniforme (où la luminance seule est peu discriminante).
+  double _digitTravel = 0.0;
+  double _digitMinX = 0.0;
+  double _digitMaxX = 0.0;
+  double _digitPrevX = 0.0;
+  bool _digitSeen = false;
+  bool _digitPrevValid = false;
+  int _digitMissing = 0;
+  double _digitWidthRef = 0.0;
+  String? _digitValue;
+
   CoverageTracker(this.rows, this.cols,
       {double targetCredit = 300.0, double noiseFloor = 2.0})
       : _targetCredit = targetCredit,
@@ -264,9 +279,60 @@ class CoverageTracker {
     return coverage;
   }
 
-  // Couverture = crédit de rotation accumulé / cible. Proportionnel à l'angle
-  // total parcouru autour de l'objet (≈ surface explorée), pas au temps.
-  double get coverage => (_credit / _targetCredit).clamp(0.0, 1.0);
+  /// Suit le chiffre gravé comme repère de rotation. [det] est le résultat de
+  /// détection de la frame courante, [expectedDigit] le chiffre attendu (scan 1),
+  /// [imageWidth] la largeur de l'image (pour normaliser le déplacement).
+  void addDigit(DigitDetectionResult det, String? expectedDigit, int imageWidth) {
+    if (_digitWidthRef == 0.0 && imageWidth > 0) {
+      _digitWidthRef = imageWidth.toDouble();
+    }
+    if (det.value == null || det.box == null || det.confidence < 0.6) {
+      _digitMissing++;
+      return;
+    }
+    if (expectedDigit != null && det.value != expectedDigit) {
+      _digitMissing++;
+      return;
+    }
+    _digitValue = det.value;
+    final cx = det.box!.x + det.box!.width / 2;
+
+    // Réapparition après disparition (chiffre passé derrière l'œuf) : on
+    // réancre sans compter de crédit (évite de compteur un grand saut latéral).
+    final reappeared = _digitMissing >= 3;
+    _digitMissing = 0;
+
+    if (!_digitSeen || reappeared) {
+      _digitSeen = true;
+      _digitMinX = cx;
+      _digitMaxX = cx;
+      _digitPrevX = cx;
+      _digitPrevValid = true;
+      return;
+    }
+    if (_digitPrevValid) {
+      _digitTravel += (cx - _digitPrevX).abs();
+    }
+    _digitPrevX = cx;
+    _digitMinX = min(_digitMinX, cx);
+    _digitMaxX = max(_digitMaxX, cx);
+  }
+
+  double get _lumCoverage => (_credit / _targetCredit).clamp(0.0, 1.0);
+
+  /// Couverture apportée par le repère chiffre : déplacement cumulé du chiffre
+  /// divisé par la largeur d'image (un trajet bord-à-bord ≈ 180° ≈ 50% surface).
+  double get digitCoverage {
+    if (!_digitSeen || _digitWidthRef <= 0) return 0.0;
+    return (_digitTravel / _digitWidthRef).clamp(0.0, 1.0);
+  }
+
+  String? get digitValue => _digitValue;
+
+  // Couverture = max(luminance, repère chiffre). Le chiffre (quand il est
+  // visible et se déplace) domine ; la luminance assure un repli quand le
+  // chiffre est caché (dos de l'œuf) ou non détecté.
+  double get coverage => max(_lumCoverage, digitCoverage);
 
   // Stable = aucun changement de vue depuis plusieurs frames (utilisateur a
   // cessé de tourner l'objet).
@@ -303,6 +369,12 @@ class CoverageTracker {
     _totalFrames = 0;
     _credit = 0.0;
     _lastSig = null;
+    _digitTravel = 0.0;
+    _digitSeen = false;
+    _digitPrevValid = false;
+    _digitMissing = 0;
+    _digitValue = null;
+    _digitWidthRef = 0.0;
     for (final row in _zoneBins) {
       for (final set in row) {
         set.clear();
