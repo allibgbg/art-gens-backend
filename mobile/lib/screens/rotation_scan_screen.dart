@@ -367,7 +367,17 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
         'value': _pendingDigit,
         'hu': _lastDetHu,
       });
-      if (resp['authentic'] != true) {
+      if (resp['authentic'] == true) {
+        // OK : correspond au moule officiel.
+      } else if (resp['reason'] == 'reference_non_definie') {
+        // Bootstrap : premier calibrage. Un artiste de confiance enregistre la
+        // signature EXACTE de ce moule comme référence officielle (côté
+        // serveur). Les scans suivants seront vérifiés strictement contre elle.
+        await api.post('/digits/reference', body: {
+          'value': _pendingDigit,
+          'hu': _lastDetHu,
+        });
+      } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
