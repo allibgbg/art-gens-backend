@@ -168,9 +168,11 @@ class CoverageTracker {
   final Set<int> _globalBins = {};
   int _framesSinceNew = 0;
   int _totalFrames = 0;
+  final int _targetFrames;
 
-  CoverageTracker(this.rows, this.cols)
-      : _zoneBins = List.generate(
+  CoverageTracker(this.rows, this.cols, {int targetFrames = 75})
+      : _targetFrames = targetFrames,
+        _zoneBins = List.generate(
           rows, (_) => List.generate(cols, (_) => <int>{}));
 
   double addFrame(SpatialSignature sig) {
@@ -196,7 +198,11 @@ class CoverageTracker {
     return coverage;
   }
 
-  double get coverage => _globalBins.length / _totalBins;
+  // La couverture reflète le nombre de frames nettes collectées pendant la
+  // rotation de l'objet (proxy de « surface scannée ») plutôt que la diversité
+  // des bins de couleur : un objet de teinte uniforme saturait sinon à quelques
+  // bins et le scan restait bloqué même en tournant l'objet.
+  double get coverage => (_totalFrames / _targetFrames).clamp(0.0, 1.0);
 
   bool get isStable => _framesSinceNew >= 5;
 
