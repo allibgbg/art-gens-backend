@@ -73,9 +73,10 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
     }
 
     // On cherche le chiffre parmi TOUS les contours (pas seulement le plus
-    // grand) : sur un objet brillant, un reflet spéculaire peut être le plus
-    // gros contour sans être le chiffre. On garde le contour dont la forme
-    // ressemble le plus à un chiffre moulé (distance Hu minimale).
+    // grand) : le chiffre moulé en relief n'est pas forcément le plus gros
+    // contour de l'image (l'œuf en béton mat occupe beaucoup plus de pixels).
+    // On garde le contour dont la forme ressemble le plus à un chiffre moulé
+    // (distance Hu minimale).
     double bestDist = double.infinity;
     cv.VecPoint? best;
     cv.Rect? bestRect;

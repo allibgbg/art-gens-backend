@@ -1,17 +1,14 @@
 """Reconstruction 3D photogrammétrique à partir d'un dossier de photos.
 
-Pipeline (COLMAP CLI + Open3D) :
-  1. feature_extractor      -> SIFT sur chaque image
-  2. exhaustive_matcher     -> matching des features
-  3. mapper                 -> nuage de points sparse + poses
-  4. image_undistorter     -> prépare le workspace dense
-  5. patch_match_stereo     -> cartes de profondeur (MVS)
-  6. stereo_fusion          -> nuage de points dense (.ply)
-  7. Poisson (Open3D)       -> mesh texturé (.obj)
+Deux moteurs (le 1er disponible est utilisé) :
+  A. pycolmap (pip, tourne en CPU, SANS GPU ni binaire COLMAP séparé)
+     -> SfM sparse -> nuage de points -> mesh Poisson (Open3D).
+  B. COLMAP CLI (binaire `colmap` dans le PATH) -> pipeline complet
+     feature -> matching -> mapper -> dense MVS (GPU) -> fusion -> Poisson.
 
-COLMAP doit être installé sur la machine (binaire `colmap` dans le PATH,
-ou via la variable d'env COLMAP_BIN). Open3D est importé paresseusement
-pour ne pas bloquer le démarrage de l'app si non installé.
+pycolmap est importé paresseusement et n'est PAS dans requirements.txt
+principal (pour ne pas casser le déploiement Render). Il se trouve dans
+requirements-3d.txt (image Docker du worker). Open3D est importé paresseusement.
 """
 import os
 import sys
@@ -34,18 +31,6 @@ def colmap_available() -> bool:
         return False
 
 
-def _run(args, cwd=None):
-    logger.info("colmap %s", " ".join(args))
-    r = subprocess.run(
-        [COLMAP_BIN] + args, capture_output=True, text=True, cwd=cwd, timeout=1800
-    )
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"colmap {' '.join(args)} a échoué (code {r.returncode}):\n{r.stderr}"
-        )
-    return r
-
-
 def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = True) -> dict:
     images_dir = os.path.abspath(images_dir)
     if not os.path.isdir(images_dir):
@@ -64,6 +49,69 @@ def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = Tr
         output_dir = tempfile.mkdtemp(prefix="artgens_recon_")
     os.makedirs(output_dir, exist_ok=True)
 
+    # 1) pycolmap (CPU) en priorité : pas de GPU ni de binaire à installer.
+    try:
+        return _reconstruct_pycolmap(images_dir, output_dir, len(imgs))
+    except ImportError:
+        logger.info("pycolmap indisponible, tentative COLMAP CLI.")
+    except Exception as e:
+        logger.warning("pycolmap a échoué: %s", e)
+
+    # 2) COLMAP CLI (qualité supérieure, dense si GPU).
+    if colmap_available():
+        return _reconstruct_colmap_cli(images_dir, output_dir, dense, len(imgs))
+
+    raise RuntimeError(
+        "Aucun moteur de reconstruction disponible. "
+        "Installe 'pycolmap' (pip install pycolmap) ou le binaire 'colmap'."
+    )
+
+
+def _reconstruct_pycolmap(images_dir: str, output_dir: str, num_images: int) -> dict:
+    import pathlib
+    import numpy as np
+    import pycolmap
+    import open3d as o3d
+
+    img_dir = pathlib.Path(images_dir)
+    out = pathlib.Path(output_dir)
+    db = out / "database.db"
+
+    pycolmap.extract_features(db, img_dir)
+    pycolmap.match_exhaustive(db)
+    maps = pycolmap.incremental_mapping(db, img_dir, out)
+    if not maps:
+        raise RuntimeError("pycolmap: aucune reconstruction (pas assez de points communs).")
+
+    recon = list(maps.values())[0]
+    pts = [p.xyz for p in recon.points3D.values()]
+    if len(pts) < 50:
+        raise RuntimeError("pycolmap: nuage trop sparse pour un mesh fiable.")
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.array(pts, dtype=np.float64))
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+    )
+    mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=8)
+    mesh.remove_degenerate_triangles()
+    mesh.remove_duplicated_vertices()
+    mesh.remove_unreferenced_vertices()
+    mesh.compute_vertex_normals()
+    mesh_path = os.path.join(output_dir, "model.obj")
+    o3d.io.write_triangle_mesh(mesh_path, mesh)
+    return {
+        "mesh": mesh_path,
+        "point_cloud": None,
+        "output_dir": output_dir,
+        "dense": False,
+        "engine": "pycolmap",
+        "num_images": num_images,
+        "num_points": len(pts),
+    }
+
+
+def _reconstruct_colmap_cli(images_dir: str, output_dir: str, dense: bool, num_images: int) -> dict:
     db = os.path.join(output_dir, "database.db")
     sparse = os.path.join(output_dir, "sparse")
     dense_dir = os.path.join(output_dir, "dense")
@@ -86,7 +134,6 @@ def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = Tr
 
     model = os.path.join(sparse, "0")
     if not os.path.isdir(model):
-        # Parfois le mapper écrit directement dans sparse/ ; on cherche un dossier.
         sub = [d for d in os.listdir(sparse) if os.path.isdir(os.path.join(sparse, d))]
         if not sub:
             raise RuntimeError("Reconstruction sparse échouée (aucun modèle produit).")
@@ -106,14 +153,9 @@ def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = Tr
             "--workspace_format", "COLMAP",
         ])
         fused = os.path.join(output_dir, "fused.ply")
-        _run([
-            "stereo_fusion",
-            "--workspace_path", dense_dir,
-            "--output_path", fused,
-        ])
+        _run(["stereo_fusion", "--workspace_path", dense_dir, "--output_path", fused])
         point_cloud = fused
     else:
-        # Fallback sparse : exporter le nuage sparse en PLY.
         point_cloud = os.path.join(output_dir, "sparse.ply")
         _run([
             "model_converter",
@@ -128,12 +170,25 @@ def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = Tr
         "point_cloud": point_cloud,
         "output_dir": output_dir,
         "dense": dense,
-        "num_images": len(imgs),
+        "engine": "colmap-cli",
+        "num_images": num_images,
     }
 
 
+def _run(args, cwd=None):
+    logger.info("colmap %s", " ".join(args))
+    r = subprocess.run(
+        [COLMAP_BIN] + args, capture_output=True, text=True, cwd=cwd, timeout=1800
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"colmap {' '.join(args)} a échoué (code {r.returncode}):\n{r.stderr}"
+        )
+    return r
+
+
 def _poisson_mesh(ply_path: str, out_obj: str) -> str:
-    import open3d as o3d  # import paresseux
+    import open3d as o3d
 
     pcd = o3d.io.read_point_cloud(ply_path)
     if pcd.is_empty():
@@ -143,7 +198,7 @@ def _poisson_mesh(ply_path: str, out_obj: str) -> str:
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
         )
     pcd.orient_normals_consistent_towards_camera_location([0, 0, 0])
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
+    mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_vertices()
     mesh.remove_unreferenced_vertices()
@@ -158,10 +213,10 @@ if __name__ == "__main__":
         sys.exit(1)
     folder = sys.argv[1]
     use_dense = "--sparse" not in sys.argv
-    if not colmap_available():
-        print("COLMAP introuvable. Installe-le et mets 'colmap' dans le PATH "
-              "(ou définit COLMAP_BIN).")
+    try:
+        res = reconstruct_folder(folder, dense=use_dense)
+    except RuntimeError as e:
+        print("ÉCHEC:", e)
         sys.exit(2)
-    res = reconstruct_folder(folder, dense=use_dense)
     print(json.dumps({k: v for k, v in res.items() if k != "mesh"}, indent=2))
     print("MESH:", res["mesh"])

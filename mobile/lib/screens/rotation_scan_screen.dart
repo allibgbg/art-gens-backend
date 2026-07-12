@@ -234,10 +234,33 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   void _runCapture(CameraImage image, DigitDetectionResult det) {
     final gray = yPlaneToGrayMat(image);
     if (gray == null) return;
-    cv.Mat region;
+
+    // Reconstruit le masque binaire exactement comme detectDigit, pour afficher
+    // la FORME du chiffre (et pas seulement l'intensité grayscale).
+    final clahe = cv.CLAHE(2.0, (8, 8));
+    final enhanced = clahe.apply(gray);
+    clahe.dispose();
+    final blurred = cv.gaussianBlur(enhanced, (5, 5), 0);
+    enhanced.dispose();
+    final bin = cv.adaptiveThreshold(
+      blurred, 255.0, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 5.0,
+    );
+    blurred.dispose();
+    final kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
+    final cleaned = cv.morphologyEx(bin, cv.MORPH_OPEN, kernel);
+    bin.dispose();
+    kernel.dispose();
+
+    cv.Rect regionRect;
     String zone;
     if (det.box != null) {
-      region = gray.region(det.box!);
+      // petite marge pour voir le chiffre dans son contexte
+      final m = (det.box!.width * 0.12).toInt();
+      final x = (det.box!.x - m).clamp(0, gray.cols - 1);
+      final y = (det.box!.y - m).clamp(0, gray.rows - 1);
+      final w = (det.box!.width + 2 * m).clamp(1, gray.cols - x);
+      final h = (det.box!.height + 2 * m).clamp(1, gray.rows - y);
+      regionRect = cv.Rect(x, y, w, h);
       zone = 'chiffre détecté box=${det.box}';
     } else {
       // Pas de chiffre détecté : on capture la zone centrale pour voir ce qu'il
@@ -246,12 +269,19 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
       final ch = (gray.rows * 0.5).toInt();
       final x = ((gray.cols - cw) / 2).toInt();
       final y = ((gray.rows - ch) / 2).toInt();
-      region = gray.region(cv.Rect(x, y, cw, ch));
+      regionRect = cv.Rect(x, y, cw, ch);
       zone = 'AUCUN chiffre détecté -> centre de l\'image';
     }
+
+    final regionGray = gray.region(regionRect);
+    final regionBin = cleaned.region(regionRect);
     gray.dispose();
-    final ascii = _matToAscii(region);
-    region.dispose();
+    cleaned.dispose();
+
+    final asciiGray = _matToAscii(regionGray);
+    final asciiBin = _matToAscii(regionBin, invert: true);
+    regionGray.dispose();
+    regionBin.dispose();
 
     final sb = StringBuffer();
     sb.writeln('=== CAPTURE CHIFFRE (debug) ===');
@@ -259,8 +289,10 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     sb.writeln('value=${det.value}  confidence=${det.confidence.toStringAsFixed(3)}');
     sb.writeln('digitDebug=$digitDebug');
     sb.writeln('hu(4)=${det.hu}');
-    sb.writeln('glyphe (gris, ${ascii.split('\n').length} lignes) :');
-    sb.writeln(ascii);
+    sb.writeln('--- MASQUE BINAIRE (forme du chiffre, @=chiffre) ---');
+    sb.writeln(asciiBin);
+    sb.writeln('--- GRAYSCALE (intensité brute) ---');
+    sb.writeln(asciiGray);
     final text = sb.toString();
     if (mounted) {
       setState(() => _captureText = text);
@@ -284,13 +316,15 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   }
 
   // Rendu ASCII d'une matrice grayscale (intensité -> caractère).
-  String _matToAscii(cv.Mat m, {int cols = 30, int rows = 30}) {
+  // [invert]=true pour un masque binaire : le chiffre (255) devient '@'.
+  String _matToAscii(cv.Mat m, {int cols = 30, int rows = 30, bool invert = false}) {
     const ramp = '@%#*+=-:. ';
     final r = cv.resize(m, (cols, rows));
     final buf = StringBuffer();
     for (int y = 0; y < rows; y++) {
       for (int x = 0; x < cols; x++) {
-        final v = r.atU8(y, i1: x);
+        var v = r.atU8(y, i1: x);
+        if (invert) v = 255 - v;
         final idx = (v / 255 * (ramp.length - 1)).round().clamp(0, ramp.length - 1);
         buf.write(ramp[idx]);
       }
