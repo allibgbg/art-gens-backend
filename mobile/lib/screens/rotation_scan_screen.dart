@@ -50,10 +50,13 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
       final controller = CameraController(cam, ResolutionPreset.medium);
       await controller.initialize();
       try {
+        await controller.setFocusMode(FocusMode.auto);
         final minZ = await controller.getMinZoomLevel();
         final maxZ = await controller.getMaxZoomLevel();
         await controller.setZoomLevel(1.4.clamp(minZ, maxZ));
-        await controller.setFocusMode(FocusMode.auto);
+        // Même système que le scan 1 (détection chiffre) : on reste en mode auto
+        // et on pointe la MAP au centre. Pas de FocusMode.locked (inefficace
+        // sur CameraX et qui avorte la mise au point).
         await controller.setFocusPoint(const Offset(0.5, 0.5));
       } catch (_) {}
       if (mounted) {
