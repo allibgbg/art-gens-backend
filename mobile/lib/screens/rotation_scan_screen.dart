@@ -35,6 +35,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   String? _pendingDigit; // chiffre détecté stable, en attente de confirmation
   bool _confirming = false; // appel serveur de vérification en cours
   List<double>? _lastDetHu; // signature Hu du dernier chiffre détecté
+  String _digitDebug = ''; // métriques de la dernière tentative de détection
   String? _pieceId;
 
   // Stabilité du chiffre : on n'accepte un chiffre détecté qu'après N
@@ -183,6 +184,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
       }
     }
     if (det.hu != null) _lastDetHu = det.hu;
+    _digitDebug = digitDebug;
     _tracker.addDigit(det, _digitValue, image.width);
 
     // 2) Base (fond poncé) : détection throttlée, capture une seule fois.
@@ -596,6 +598,14 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                             style: const TextStyle(
                               color: Colors.white54,
                               fontSize: 11,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'debug chiffre: ${_digitDebug.isEmpty ? "-" : _digitDebug}',
+                            style: const TextStyle(
+                              color: Colors.white38,
+                              fontSize: 10,
                             ),
                           ),
                         ],

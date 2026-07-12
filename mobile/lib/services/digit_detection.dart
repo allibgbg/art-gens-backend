@@ -27,6 +27,10 @@ void setDigitReference(String value, List<double> hu) {
   _customRefs[value] = List<double>.from(hu);
 }
 
+/// Dernière info de debug (métriques du meilleur contour / raison de rejet).
+/// Utile pour diagnostiquer pourquoi un chiffre n'est pas détecté.
+String digitDebug = '';
+
 /// Oublie les templates (nouvelle session de scan).
 void clearDigitReferences() {
   _customRefs.clear();
@@ -68,17 +72,15 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
       if (a > imgArea * 0.005) bigCount++;
     }
     if (best == null || best.length < 10) {
+      digitDebug = 'aucun contour';
       cleaned.dispose(); contours.dispose();
       return     const DigitDetectionResult(null, 0, null, null);
     }
-    // Un chiffre gravé sur un objet propre DOMINE la scène (peu d'autres
-    // contours). Un fond chargé (décor, objets) a beaucoup de contours -> on
-    // rejette pour éviter les faux positifs sur l'environnement.
-    if (totalArea > 0 && maxArea / totalArea < 0.4) {
-      cleaned.dispose(); contours.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
-    if (bigCount > 12) {
+    // Scène TRÈS chargée (décor, beaucoup d'objets) : repli de sécurité pour
+    // éviter de proposer un chiffre sur un fond occupé. Seuil volontairement
+    // haut ; la justesse finale repose sur la confirmation + le template serveur.
+    if (bigCount > 40) {
+      digitDebug = 'scène chargée bigCount=$bigCount';
       cleaned.dispose(); contours.dispose();
       return     const DigitDetectionResult(null, 0, null, null);
     }
@@ -87,20 +89,25 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
     contours.dispose();
 
     final areaRatio = maxArea / imgArea;
-    if (areaRatio < 0.008 || areaRatio > 0.30) {
-      cleaned.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
     final aspect = rect.width / math.max(1, rect.height);
-    if (aspect < 0.35 || aspect > 1.4) {
+    // Un chiffre gravé en creux apparaît comme une zone sombre PLEINE après
+    // seuillage -> solidité ÉLEVÉE (~0.6-0.95), pas un trait fin. On autorise
+    // donc une large plage de solidité.
+    final solidity = maxArea / (rect.width * rect.height);
+    // Filtres LARGES : on veut surtout ne pas manquer le vrai chiffre. La
+    // validation vient de la confirmation utilisateur + du template serveur.
+    if (areaRatio < 0.002 || areaRatio > 0.6) {
+      digitDebug = 'rejet area=$areaRatio';
       cleaned.dispose();
       return     const DigitDetectionResult(null, 0, null, null);
     }
-    // Un chiffre gravé est un trait FIN (faible solidité). Un blob plein, une
-    // ombre ou une tache de fond a une solidité élevée -> on rejette. C'est le
-    // principal discriminant contre les faux positifs sur fond vide/bruité.
-    final solidity = maxArea / (rect.width * rect.height);
-    if (solidity < 0.08 || solidity > 0.55) {
+    if (aspect < 0.15 || aspect > 3.0) {
+      digitDebug = 'rejet aspect=$aspect';
+      cleaned.dispose();
+      return     const DigitDetectionResult(null, 0, null, null);
+    }
+    if (solidity < 0.02 || solidity > 0.98) {
+      digitDebug = 'rejet solidity=$solidity';
       cleaned.dispose();
       return     const DigitDetectionResult(null, 0, null, null);
     }
@@ -171,6 +178,7 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
         }
       });
       const tol = 1.2;
+      digitDebug = 'auth d=$bestD tol=$tol';
       if (bestD > tol) {
         return const DigitDetectionResult(null, 0, null, null);
       }
@@ -196,9 +204,10 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
       bestDist = math.min(d2, d5);
     }
     final conf = (1.0 - bestDist / 10.0).clamp(0.0, 1.0);
+    digitDebug = 'prop $guess conf=$conf area=$areaRatio aspect=$aspect sol=$solidity';
 
     // Rejeter si pas assez confiant (évite les faux positifs sur le fond).
-    if (conf < 0.75) return const DigitDetectionResult(null, 0, null, null);
+    if (conf < 0.6) return const DigitDetectionResult(null, 0, null, null);
 
     return DigitDetectionResult(guess, conf, rect, huLogUsed);
   } catch (_) {
