@@ -59,8 +59,10 @@ class LabColor {
 class SpatialSignature {
   final int rows, cols;
   final List<List<List<LabColor>>> zones;
+  final List<List<double>> lumSum;
+  final List<List<int>> lumCount;
 
-  SpatialSignature(this.rows, this.cols, this.zones);
+  SpatialSignature(this.rows, this.cols, this.zones, this.lumSum, this.lumCount);
 
   int get zoneCount => rows * cols;
 
@@ -79,7 +81,44 @@ class SpatialSignature {
             (zone as List).map((c) => LabColor.fromJson(c as Map<String, dynamic>)).toList()
         ).toList()
     ).toList();
-    return SpatialSignature(rows, cols, zones);
+    final lumSum = List.generate(rows, (_) => List.filled(cols, 0.0));
+    final lumCount = List.generate(rows, (_) => List.filled(cols, 0));
+    return SpatialSignature(rows, cols, zones, lumSum, lumCount);
+  }
+
+  double meanL(int r, int c) =>
+      lumCount[r][c] > 0 ? lumSum[r][c] / lumCount[r][c] : 0.0;
+
+  LabColor meanColor(int r, int c) {
+    final list = zones[r][c];
+    if (list.isEmpty) return const LabColor(0, 0);
+    double sa = 0, sb = 0;
+    for (final l in list) {
+      sa += l.a;
+      sb += l.b;
+    }
+    return LabColor(sa / list.length, sb / list.length);
+  }
+
+  /// Distance moyenne (plan Lab incluant L) entre cette vue et une autre.
+  /// Sert à détecter un changement de point de vue (rotation de l'œuf) :
+  /// pour un objet uniforme les (a,b) ne bougent pas, seule la luminance L
+  /// évolue avec la rotation, d'où l'inclusion de L.
+  double fieldDistance(SpatialSignature other) {
+    if (rows != other.rows || cols != other.cols) return 0.0;
+    double total = 0;
+    int n = 0;
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        if (lumCount[r][c] == 0 || other.lumCount[r][c] == 0) continue;
+        final dl = meanL(r, c) - other.meanL(r, c);
+        final da = meanColor(r, c).a - other.meanColor(r, c).a;
+        final db = meanColor(r, c).b - other.meanColor(r, c).b;
+        total += sqrt(dl * dl + da * da + db * db);
+        n++;
+      }
+    }
+    return n == 0 ? 0.0 : total / n;
   }
 
   static const int _gridRows = 4;
@@ -105,6 +144,14 @@ class SpatialSignature {
     final zones = List.generate(
       _gridRows,
       (_) => List.generate(_gridCols, (_) => <LabColor>[]),
+    );
+    final lumSum = List.generate(
+      _gridRows,
+      (_) => List.filled(_gridCols, 0.0),
+    );
+    final lumCount = List.generate(
+      _gridRows,
+      (_) => List.filled(_gridCols, 0),
     );
 
     if (image.format.group == ImageFormatGroup.yuv420 || image.format.group == ImageFormatGroup.nv21) {
@@ -148,17 +195,24 @@ class SpatialSignature {
           final col = (relX ~/ (cropW ~/ _gridCols)).clamp(0, _gridCols - 1);
           final row = (relY ~/ (cropH ~/ _gridRows)).clamp(0, _gridRows - 1);
           zones[row][col].add(lab);
+          lumSum[row][col] += L;
+          lumCount[row][col] += 1;
         }
       }
     }
 
-    return SpatialSignature(_gridRows, _gridCols, zones);
+    return SpatialSignature(_gridRows, _gridCols, zones, lumSum, lumCount);
   }
 }
 
 /// Suivi de couverture multi-frame.
-/// Quantifie l'espace (a,b) en bins 10×10 et tracke
-/// quels bins ont été vus dans chaque zone + global.
+/// La couverture avance uniquement lorsque la VUE change entre deux frames
+/// (l'œuf a tourné) : on accumule un « crédit de rotation » égal à la distance
+/// Lab (incluant la luminance L) entre la frame courante et la dernière vue
+/// acceptée, moins un plancher de bruit. Ainsi, tenir l'objet immobile ne fait
+/// pas progresser la couverture ; il faut réellement le faire pivoter pour
+/// explorer sa surface. Un filet de sécurité (beaucoup de frames sans crédit)
+/// évite un scan éternel si la détection échoue.
 class CoverageTracker {
   static const int _binsPerAxis = 10;
   static const int _totalBins = _binsPerAxis * _binsPerAxis;
@@ -166,12 +220,17 @@ class CoverageTracker {
   final int rows, cols;
   final List<List<Set<int>>> _zoneBins;
   final Set<int> _globalBins = {};
-  int _framesSinceNew = 0;
+  int _framesSinceCredit = 0;
   int _totalFrames = 0;
-  final int _targetFrames;
+  final double _targetCredit;
+  final double _noiseFloor;
+  double _credit = 0.0;
+  SpatialSignature? _lastSig;
 
-  CoverageTracker(this.rows, this.cols, {int targetFrames = 400})
-      : _targetFrames = targetFrames,
+  CoverageTracker(this.rows, this.cols,
+      {double targetCredit = 300.0, double noiseFloor = 2.0})
+      : _targetCredit = targetCredit,
+        _noiseFloor = noiseFloor,
         _zoneBins = List.generate(
           rows, (_) => List.generate(cols, (_) => <int>{}));
 
@@ -189,23 +248,29 @@ class CoverageTracker {
       }
     }
 
-    if (newBins == 0) {
-      _framesSinceNew++;
+    if (_lastSig != null) {
+      final d = sig.fieldDistance(_lastSig!);
+      if (d > _noiseFloor) {
+        _credit += (d - _noiseFloor);
+        _framesSinceCredit = 0;
+      } else {
+        _framesSinceCredit++;
+      }
     } else {
-      _framesSinceNew = 0;
+      _framesSinceCredit = 0;
     }
+    _lastSig = sig;
 
     return coverage;
   }
 
-  // La couverture reflète la quantité de données (frames nettes) accumulées
-  // pendant le scan. On la garde volontairement élevée (targetFrames = 400)
-  // pour forcer l'accumulation d'un maximum de données : le scan ne culmine
-  // pas en quelques secondes. La diversité des bins de couleur n'est pas
-  // utilisée comme proxy (un objet de teinte uniforme saturait sinon).
-  double get coverage => (_totalFrames / _targetFrames).clamp(0.0, 1.0);
+  // Couverture = crédit de rotation accumulé / cible. Proportionnel à l'angle
+  // total parcouru autour de l'objet (≈ surface explorée), pas au temps.
+  double get coverage => (_credit / _targetCredit).clamp(0.0, 1.0);
 
-  bool get isStable => _framesSinceNew >= 5;
+  // Stable = aucun changement de vue depuis plusieurs frames (utilisateur a
+  // cessé de tourner l'objet).
+  bool get isStable => _framesSinceCredit >= 6;
 
   double get confidence {
     if (_totalFrames < 3) return 0;
@@ -227,13 +292,17 @@ class CoverageTracker {
         }).toList();
       }),
     );
-    return SpatialSignature(rows, cols, centroids).toJson();
+    final lumSum = List.generate(rows, (_) => List.filled(cols, 0.0));
+    final lumCount = List.generate(rows, (_) => List.filled(cols, 0));
+    return SpatialSignature(rows, cols, centroids, lumSum, lumCount).toJson();
   }
 
   void reset() {
     _globalBins.clear();
-    _framesSinceNew = 0;
+    _framesSinceCredit = 0;
     _totalFrames = 0;
+    _credit = 0.0;
+    _lastSig = null;
     for (final row in _zoneBins) {
       for (final set in row) {
         set.clear();

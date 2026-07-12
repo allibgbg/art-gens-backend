@@ -37,7 +37,14 @@ class MultiAngleScanner {
   double get confidence => _tracker.confidence;
   int get framesProcessed => _frameCount;
   int get skippedBlurry => _skippedBlurry;
-  bool get isComplete => _tracker.isStable && _tracker.confidence >= 0.6 && _tracker.coverage >= 0.8;
+  // Completion quand la surface explorée est suffisante (couverture >= 0.8)
+  // ET l'utilisateur a cessé de tourner l'objet (isStable), OU au crédit max
+  // (rotation très complète), OU en filet de sécurité après beaucoup de frames
+  // nettes sans progression (évite un scan éternel si la détection échoue).
+  bool get isComplete =>
+      (_tracker.coverage >= 0.8 && _tracker.isStable) ||
+      _tracker.coverage >= 1.0 ||
+      (_frameCount >= 1200 && _tracker.isStable);
 
   /// Scan « éternel » : le flux ne s'arrête que lorsque la couverture
   /// suffisante (isComplete) est atteinte. Aucun timeout ni cap de frames.
