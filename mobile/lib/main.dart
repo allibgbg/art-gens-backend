@@ -121,9 +121,18 @@ class _AuthGateState extends State<_AuthGate> {
             mainAxisSize: MainAxisSize.min,
             children: [
               CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Le réveil du serveur...',
-                  style: TextStyle(color: Colors.white70, fontSize: 16)),
+              SizedBox(height: 24),
+              Text(
+                'Le réveil du serveur…',
+                style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Premier démarrage : le backend Render (plan gratuit) se réveille.\nCela peut prendre 30–60 secondes.',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
             ],
           ),
         ),

@@ -18,9 +18,9 @@
 3. `POST /pieces/{id}/finalize` → finalise avec display_number, series_value, etc.
 
 ### Ordre des phases (dans le mobile)
-1. **Phase 1** - `TextureScanScreen` : scan fond poncé (ORB + CLAHE), top 256 keypoints, stabilité 2s → `POST /draft` → auto-next
-2. **Phase 2** - `DigitScanScreen` : photo dessus, analyse Hu moments du chiffre gravé → `PATCH top_image` → auto-next
-3. **Phase 3** - `RotationScanScreen` : scan rotation complète, signature couleur via `MultiAngleScanner` → `PATCH color_signature` → auto-next
+1. **Phase 1** - `DigitScanScreen` : photo dessus, détection du chiffre gravé (2/5) par moments de Hu → `top_image` + `digit_guess` (transmis à Phase 2)
+2. **Phase 2** - `TextureScanScreen` : scan du fond poncé (ORB + CLAHE), **verrouillage de la MAP dès 72% de netteté** (sharpnessRatioInFixedCircle, au centre), `fillRatio >= 0.70`, top 256 keypoints, stabilité 2s → `POST /draft` → auto-next
+3. **Phase 3** - `RotationScanScreen` : scan rotation complète, signature couleur **4×4** via `MultiAngleScanner` → `PATCH color_signature` → auto-next
 4. **Phase 4** - `FinalizePieceScreen` : formulaire métadonnées → `POST /finalize`
 
 ### Règles absolues

@@ -292,9 +292,10 @@ class MatchingOrchestrator:
     """
 
     SEUIL_FINAL = 0.65
-    POIDS_TEXTURE = 0.6
+    POIDS_TEXTURE = 0.5
     POIDS_HU = 0.2
-    POIDS_LBP = 0.2
+    POIDS_LBP = 0.15
+    POIDS_COULEUR = 0.15
 
     @staticmethod
     def verify_piece(
@@ -342,11 +343,13 @@ class MatchingOrchestrator:
             result["hu_score"] = hu_score
             result["lbp_score"] = lbp_score
 
-        # Score combiné pondéré
+        # Score combiné pondéré (texture = décision finale, couleur = pré-tri intégré)
         combined = (
             MatchingOrchestrator.POIDS_TEXTURE * texture_score
             + MatchingOrchestrator.POIDS_HU * hu_score
             + MatchingOrchestrator.POIDS_LBP * lbp_score
+            + (MatchingOrchestrator.POIDS_COULEUR * result["color_score"]
+               if result["color_score"] is not None else 0.0)
         )
         result["combined_score"] = combined
         result["match"] = combined >= MatchingOrchestrator.SEUIL_FINAL

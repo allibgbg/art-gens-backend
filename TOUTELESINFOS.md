@@ -110,7 +110,7 @@ Git a été installé via Chocolatey sur ce PC (`C:\ProgramData\chocolatey\bin\c
 
 ### Scan 3 phases (100% automatique, zéro bouton)
 
-#### Phase 1 — Texture du fond (TextureScanScreen)
+#### Phase 2 — Texture du fond (TextureScanScreen)
 - Extrait les points ORB (OpenCV) du fond poncé
 - Top 256 meilleurs keypoints sauvegardés (triés par response)
 - CLAHE avant extraction pour améliorer le contraste
@@ -120,16 +120,16 @@ Git a été installé via Chocolatey sur ce PC (`C:\ProgramData\chocolatey\bin\c
 - `AdaptiveSharpnessGate` : calibration 20s, seuil plancher 1.8, ratio 70% du max
 - Auto-next vers Phase 2 après sauvegarde réussie
 
-#### Phase 2 — Chiffre gravé (DigitScanScreen)
+#### Phase 1 — Chiffre gravé (DigitScanScreen)
 - Prend une photo du dessus
 - Calcule les 7 moments de Hu (implémentés manuellement car dartcv4 1.1.8 n'exporte pas HuMoments)
 - Formules : nu20+nu02, (nu20-nu02)²+4*nu11², ...
-- Compare avec les références stockées (ref2, ref5 — valeurs approximatives)
+- Compare avec les références **mesurées** (2/5) sur les 4 premières composantes de Hu ; la 3e composante (hu2) sert de pré-filtre de signe (5 > 0, 2 < 0, discriminant quasi parfait sur 8/8 échantillons)
 - Affiche "Chiffre X détecté (YY%)"
 - Auto-next vers Phase 3 après PATCH top_image
 
 #### Phase 3 — Rotation complète (RotationScanScreen)
-- `MultiAngleScanner` avec grille 5×5 (25 positions)
+- `MultiAngleScanner` avec grille 4×4 (16 positions)
 - Capture la signature couleur sur 360°
 - Feedback visuel sur les angles couverts
 - Auto-next vers Phase 4 après PATCH color_signature
@@ -164,7 +164,7 @@ Git a été installé via Chocolatey sur ce PC (`C:\ProgramData\chocolatey\bin\c
 - API findContours : `(Contours, VecVec4i) findContours(Mat src, int mode, int method)`
 - API threshold : `(double, Mat) threshold(...)`
 - API moments : `Moments moments(Mat src, {bool binaryImage = false})`
-- Les valeurs de référence Hu (`ref2`, `ref5`) dans `digit_scan_screen.dart` sont approximatives — à calibrer avec des captures réelles
+- Les valeurs de référence Hu (`ref2`, `ref5`) dans `digit_scan_screen.dart` sont **calibrées** sur captures réelles (2/5 uniquement) ; matching sur 4 composantes + pré-filtre de signe hu2
 - Pour le scan de vérification (utilisateur lambda) : adapter le flux pour n'utiliser que la Phase 3 (rotation) avec seuil 60%
 - `trade_service.py` a `authenticity_match` toujours écrit en dur à True (trou de sécurité non corrigé)
 

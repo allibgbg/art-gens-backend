@@ -156,39 +156,78 @@ class _DigitScanScreenState extends State<DigitScanScreen> {
 
       final roi = cleaned.region(rect);
       cleaned.dispose();
-      final normalized = cv.resize(roi, (64, 64));
+
+      // Moments de Hu sur le masque binaire du chiffre (dartcv4 n'exporte pas
+      // HuMoments -> calcul manuel à partir des moments normalisés).
+      final m = cv.moments(roi, binaryImage: true);
       roi.dispose();
+      final nu20 = m.nu20, nu02 = m.nu02, nu11 = m.nu11;
+      final nu30 = m.nu30, nu12 = m.nu12, nu21 = m.nu21, nu03 = m.nu03;
+      m.dispose();
 
-      int tl = 0, tr = 0, bl = 0, br = 0;
-      for (int r = 0; r < 64; r++) {
-        for (int c = 0; c < 64; c++) {
-          if (normalized.atU8(r, i1: c) > 0) {
-            if (r < 32) { if (c < 32) tl++; else tr++; }
-            else { if (c < 32) bl++; else br++; }
-          }
-        }
+      double sq(double x) => x * x;
+      final hu = <double>[
+        nu20 + nu02,
+        sq(nu20 - nu02) + 4 * sq(nu11),
+        sq(nu30 - 3 * nu12) + sq(3 * nu21 - nu03),
+        sq(nu30 + nu12) + sq(nu21 + nu03),
+        (nu30 - 3 * nu12) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
+            + (3 * nu21 - nu03) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
+        (nu20 - nu02) * (sq(nu30 + nu12) - sq(nu21 + nu03))
+            + 4 * nu11 * (nu30 + nu12) * (nu21 + nu03),
+        (3 * nu21 - nu03) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
+            - (nu30 - 3 * nu12) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
+      ];
+      final huLog = hu.map((v) => -v.sign * math.log(v.abs() + 1e-10)).toList();
+      // Seules les 4 premières composantes de Hu sont stables sur de petits
+      // chiffres gravés : les 3 dernières changent de signe avec le bruit et la
+      // pixellisation (limite connue des moments de Hu). On ne compare donc que
+      // les 4 premières.
+      final huLogUsed = huLog.sublist(0, 4);
+
+      // Références (4 premières composantes huLog), calibrées sur vrais moules
+      // via le pipeline de recadrage sur la bille.
+      // ref5 : MESURÉ (moyenne de 5 captures réelles).
+      // ref2 : MESURÉ (moyenne de 3 captures valides, filtrées par ratio w/h).
+      // Uniquement les séries 2 et 5 gérées pour le moment.
+      const ref2 = [-0.91, -0.42, -1.62, -0.47, 0.0, 0.0, 0.0];
+      const ref5 = [0.57, 1.99, 4.78, 5.38, 0.0, 0.0, 0.0];
+
+      double huDist(List<double> a, List<double> b) {
+        double s = 0;
+        for (int i = 0; i < 4; i++) s += sq(a[i] - b[i]);
+        return math.sqrt(s);
       }
-      normalized.dispose();
 
-      final total = tl + tr + bl + br;
-      if (total < 10) return;
-
+      // Décision : la 3e composante de Hu (hu2, index 2) est un discriminant
+      // quasi parfait sur les échantillons réels (5 > 0, 2 < 0, aucun
+      // chevauchement sur 8/8). On l'utilise en pré-filtre de signe, et la
+      // confiance est calculée via la distance euclidienne 4 composantes vers
+      // la référence choisie.
       String guess;
-      if (br > bl * 1.3 && tl > tr * 1.2) {
-        guess = '2';
-      } else if (tl + tr > bl + br && tl + tr > total * 0.52) {
+      double bestDist;
+      if (huLogUsed[2] > 0) {
         guess = '5';
-      } else if (br > bl * 1.2) {
+        bestDist = huDist(huLogUsed, ref5);
+      } else if (huLogUsed[2] < 0) {
         guess = '2';
+        bestDist = huDist(huLogUsed, ref2);
       } else {
-        guess = '5';
+        final d2 = huDist(huLogUsed, ref2);
+        final d5 = huDist(huLogUsed, ref5);
+        guess = d2 < d5 ? '2' : '5';
+        bestDist = math.min(d2, d5);
       }
+      final conf = (1.0 - bestDist / 10.0).clamp(0.0, 1.0);
+
+      // Rejeter si pas assez confiant (évite les faux positifs sur le fond).
+      if (conf < 0.6) return;
 
       if (guess == _stableGuess) {
         _stableHits++;
         if (_stableHits >= _neededStableHits) {
           _digitGuess = guess;
-          _digitConfidence = 0.7;
+          _digitConfidence = conf;
         }
       } else {
         _stableGuess = guess;

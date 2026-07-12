@@ -1,13 +1,13 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../services/texture_extraction.dart';
 import '../services/api_client.dart';
-import '../services/series_config.dart';
 import '../providers/auth_provider.dart';
 import 'package:provider/provider.dart';
 import 'rotation_scan_screen.dart';
+import '../services/series_config.dart';
 
 /// Phase 2 — texture du fond poncé.
 /// Reçoit le chiffre déjà détecté en Phase 1 pour appliquer le bon preset
@@ -32,17 +32,31 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
   int _calibPct = 0;
   int _featureCount = 0;
   int _skippedBlurry = 0;
-  double _presenceRatio = 0.0;
+  double _netteRatio = 0.0;
+  double _fillRatio = 0.0;
   late TextureExtractor _extractor;
   String? _error;
   int _sensorOrientation = 0;
   int _retryCount = 0;
+  bool _focusLocked = false;
   static const int _maxRetries = 3;
   Rect? _objectRect;
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   double _zoom = 1.0;
-  double _circleFraction = 0.6;
+  double _screenWidth = 0.0;
+  double _screenHeight = 0.0;
+  // Région de scan en coordonnées image brute (calculée par frame)
+  CameraCircleRegion? _currentScanRegion;
+
+  // Convertit la région de scan (coordonnées image) en rectangle à l'écran pour affichage
+  // Comme la zone est maintenant un cercle FIXE 400px au centre, on retourne simplement ça
+  Rect? _getScanZoneScreenRect(Size screenSize) {
+    final double cx = screenSize.width / 2;
+    final double cy = screenSize.height / 2;
+    const double radius = 200.0; // 400px diamètre
+    return Rect.fromCircle(center: Offset(cx, cy), radius: radius);
+  }
 
   List<Map<String, double>>? _displayKps;
   int _lastImageW = 0;
@@ -56,7 +70,7 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     if (list == null || list.isEmpty) return [];
     final sorted = List<Map<String, double>>.from(list)
       ..sort((a, b) => (b['response'] ?? 0).compareTo(a['response'] ?? 0));
-    return sorted.take(min(30, sorted.length)).toList();
+    return sorted.take(math.min(30, sorted.length)).toList();
   }
 
   @override
@@ -87,22 +101,16 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
         _minZoom = await controller.getMinZoomLevel();
         _maxZoom = await controller.getMaxZoomLevel();
       } catch (_) {}
-      // Preset zoom/cercle par série (déterminé par le chiffre détecté en Phase 1).
+      // Preset zoom par série (déterminé par le chiffre détecté en Phase 1).
       final config = scanConfigForDigit(widget.digitGuess);
       _zoom = config.zoom.clamp(_minZoom, _maxZoom);
-      _circleFraction = config.circleFraction;
       try {
         await controller.setFocusMode(FocusMode.auto);
         await controller.setFocusPoint(const Offset(0.5, 0.5));
         await controller.setZoomLevel(_zoom);
       } catch (_) {}
-      // Laisse l'autofocus se stabiliser au centre, puis verrouille — la mise
-      // au point ne bouge plus ensuite (approximation de "focus fixe" : l'API
-      // caméra ne permet pas de fixer une distance absolue, seulement
-      // verrouiller le résultat courant de l'autofocus).
-      Future.delayed(const Duration(milliseconds: 1500), () async {
-        try { await controller.setFocusMode(FocusMode.locked); } catch (_) {}
-      });
+      // La mise au point se verrouille automatiquement quand 72% de la zone
+      // centrale est nette (voir _onImage / _lockFocus), sans délai fixe.
       if (mounted) {
         setState(() {
           _cameraController = controller;
@@ -124,6 +132,7 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     if (_cameraController == null || _capturing) return;
     setState(() {
       _capturing = true;
+      _focusLocked = false;
       _capturedFrame?.dispose();
       _capturedFrame = null;
       _skippedBlurry = 0;
@@ -140,6 +149,17 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     }
   }
 
+  Future<void> _lockFocus() async {
+    if (_focusLocked) return;
+    _focusLocked = true;
+    final controller = _cameraController;
+    if (controller == null) return;
+    try {
+      await controller.setFocusMode(FocusMode.locked);
+    } catch (_) {}
+    if (mounted) setState(() {});
+  }
+
   void _onImage(CameraImage image) {
     if (!_capturing) return;
     final rawQs = quickSharpness(image);
@@ -147,24 +167,51 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     _lastImageW = image.width;
     _lastImageH = image.height;
 
-    final ratio = sharpnessRatioInCircle(image, circleFraction: _circleFraction, threshold: 3.0);
+    // 1) Calculer la région circulaire FIXE : cercle 400px centre écran
+    final region = computeFixedCenterCircleRegion(
+      image: image,
+      sensorOrientation: _sensorOrientation,
+      screenWidth: _screenWidth,
+      screenHeight: _screenHeight,
+    );
+
+    // 2) Mettre à jour la région de scan IMMÉDIATEMENT (pour affichage zone verte)
+    _currentScanRegion = region;
+
+    // 3) Ratio de netteté dans cette même région circulaire
+    double ratio = 0.0;
+    if (region != null) {
+      ratio = sharpnessRatioInFixedCircle(
+        image,
+        screenWidth: _screenWidth,
+        screenHeight: _screenHeight,
+        sensorOrientation: _sensorOrientation,
+        threshold: 3.0,
+      );
+    }
 
     if (mounted) {
       setState(() {
         _liveSharpness = rawQs;
         _maxSharpness = gate.maxSeen;
         _calibPct = gate.calibrationProgress;
-        _presenceRatio = ratio;
+        _netteRatio = ratio;
       });
     }
 
-    if (ratio < 0.72) {
-      _stableSinceMs = null;
-      _stableDurationMs = 0;
-      return;
+    // Verrouillage de la mise au point dès que 72% de la zone centrale est nette,
+    // à la place d'un délai fixe. Tant que ce n'est pas atteint, on n'amorce pas le scan.
+    if (!_focusLocked) {
+      if (ratio >= 0.72) {
+        _lockFocus();
+      } else {
+        _stableSinceMs = null;
+        _stableDurationMs = 0;
+        return;
+      }
     }
 
-    final frame = _extractor.extract(image, forceProcess: true, zoneShrink: 0.4, logErrors: true);
+    final frame = _extractor.extract(image, region: region, logErrors: true);
     if (frame == null) {
       if (mounted) {
         setState(() {
@@ -176,13 +223,39 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     final kpDisplay = frame.keypoints.map((kp) => <String, double>{
       'x': kp.x, 'y': kp.y, 'response': kp.response,
     }).toList();
-    if (frame.keypoints.length >= 10) {
-      double minX = double.infinity, minY = double.infinity;
-      double maxX = 0, maxY = 0;
-      for (final kp in frame.keypoints) {
-        if (kp.x < minX) minX = kp.x; if (kp.x > maxX) maxX = kp.x;
-        if (kp.y < minY) minY = kp.y; if (kp.y > maxY) maxY = kp.y;
+
+    // Calculer la boîte englobante des keypoints (zone objet détectée)
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = 0, maxY = 0;
+    for (final kp in frame.keypoints) {
+      if (kp.x < minX) minX = kp.x; if (kp.x > maxX) maxX = kp.x;
+      if (kp.y < minY) minY = kp.y; if (kp.y > maxY) maxY = kp.y;
+    }
+    final kpArea = (maxX - minX) * (maxY - minY);
+    final circleArea = region != null ? (math.pi * region.radius * region.radius) : 0.0;
+    final fillRatio = circleArea > 0 ? (kpArea / circleArea).clamp(0.0, 1.0) : 0.0;
+
+    // Exiger que l'objet remplisse au moins 70% du cercle de scan avant de stabiliser
+    // (objectif à terme 90-100%, seuil souple pour l'instant)
+    const minFillRatio = 0.70;
+    if (fillRatio < minFillRatio) {
+      if (mounted) {
+        setState(() {
+          _liveSharpness = rawQs;
+          _maxSharpness = gate.maxSeen;
+          _calibPct = gate.calibrationProgress;
+          _featureCount = frame.keypoints.length;
+          _displayKps = kpDisplay;
+          _objectRect = Rect.fromLTWH(minX, minY, maxX - minX, maxY - minY);
+        });
       }
+      frame.dispose();
+      _stableSinceMs = null;
+      _stableDurationMs = 0;
+      return;
+    }
+
+    if (frame.keypoints.length >= 30) {
       final margin = 30.0;
       _objectRect = Rect.fromLTWH(
         (minX - margin).clamp(0, _lastImageW.toDouble()),
@@ -199,6 +272,7 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
       _calibPct = gate.calibrationProgress;
       _featureCount = frame.keypoints.length;
       _displayKps = kpDisplay;
+      _fillRatio = fillRatio;
     });
     if (frame.keypoints.length >= 30) {
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -330,118 +404,131 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
               const SizedBox(height: 8),
               const Text('Nouvelle tentative...', style: TextStyle(color: Colors.white54)),
             ]))
-          : LayoutBuilder(builder: (context, constraints) => Stack(children: [
-              if (_isCameraReady && _cameraController != null)
-                GestureDetector(
-                  onTapUp: (d) => _onTapFocus(d, constraints),
-                  child: CameraPreview(_cameraController!),
-                ),
-              if (!_isCameraReady && _error == null)
-                const Center(child: CircularProgressIndicator()),
-              if (_displayKps != null && _capturing) ...[
-                CustomPaint(
-                  size: Size(constraints.maxWidth, constraints.maxHeight),
-                  painter: _KeypointPainter(
-                    allKps: _displayKps!, bestKps: _bestKps,
-                    imageWidth: _lastImageW, imageHeight: _lastImageH,
-                    sensorOrientation: _sensorOrientation,
-                  ),
-                ),
-                if (_objectRect != null)
-                  CustomPaint(
-                    size: Size(constraints.maxWidth, constraints.maxHeight),
-                    painter: _ObjectSpotlight(
-                      rect: _objectRect!,
-                      imageWidth: _lastImageW,
-                      imageHeight: _lastImageH,
-                      sensorOrientation: _sensorOrientation,
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                // Mettre à jour les dimensions écran pour le mapping cercle -> image caméra
+                if (_screenWidth != constraints.maxWidth || _screenHeight != constraints.maxHeight) {
+                  _screenWidth = constraints.maxWidth;
+                  _screenHeight = constraints.maxHeight;
+                }
+                return Stack(children: [
+                  if (_isCameraReady && _cameraController != null)
+                    GestureDetector(
+                      onTapUp: (d) => _onTapFocus(d, constraints),
+                      child: CameraPreview(_cameraController!),
                     ),
-                  ),
-              ],
-              if (_capturing)
-                Center(
-                  child: SizedBox(
-                    width: MediaQuery.of(context).size.width * _circleFraction,
-                    height: MediaQuery.of(context).size.width * _circleFraction,
-                    child: CustomPaint(painter: _CircleGuidePainter()),
-                  ),
-                ),
-              if (_capturing && _maxZoom > _minZoom)
-                Positioned(
-                  right: 12,
-                  top: 80,
-                  bottom: 220,
-                  child: RotatedBox(
-                    quarterTurns: 3,
-                    child: Slider(
-                      value: _zoom,
-                      min: _minZoom,
-                      max: _maxZoom,
-                      onChanged: _setZoom,
-                      activeColor: Colors.amber,
-                    ),
-                  ),
-                ),
-              Column(children: [
-                const Spacer(),
-                Container(
-                  margin: const EdgeInsets.all(24), padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(16)),
-                  child: Column(children: [
-                    // Gauge globale
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: _saving ? 0.6 : (_stableSinceMs != null ? 0.6 * (_stableDurationMs / 2000).clamp(0.0, 1.0) : 0.0),
-                        minHeight: 16, backgroundColor: Colors.white24,
-                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+                  if (!_isCameraReady && _error == null)
+                    const Center(child: CircularProgressIndicator()),
+                  if (_displayKps != null && _capturing) ...[
+                    CustomPaint(
+                      size: Size(constraints.maxWidth, constraints.maxHeight),
+                      painter: _KeypointPainter(
+                        allKps: _displayKps!, bestKps: _bestKps,
+                        imageWidth: _lastImageW, imageHeight: _lastImageH,
+                        sensorOrientation: _sensorOrientation,
                       ),
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _saving ? 'Sauvegarde... 60%' : 'Texture : ${(_stableSinceMs != null ? (_stableDurationMs / 20).toStringAsFixed(0) : '0')}%',
-                      style: const TextStyle(color: Colors.greenAccent, fontSize: 16, fontWeight: FontWeight.bold),
+                    if (_objectRect != null)
+                      CustomPaint(
+                        size: Size(constraints.maxWidth, constraints.maxHeight),
+                        painter: _ObjectSpotlight(
+                          rect: _objectRect!,
+                          imageWidth: _lastImageW,
+                          imageHeight: _lastImageH,
+                          sensorOrientation: _sensorOrientation,
+                        ),
+                      ),
+                  ],
+                  if (_capturing)
+                    CustomPaint(
+                      painter: _ScanZonePainter(
+                        scanZone: _getScanZoneScreenRect(Size(constraints.maxWidth, constraints.maxHeight)),
+                        sensorOrientation: _sensorOrientation,
+                      ),
+                      size: Size(constraints.maxWidth, constraints.maxHeight),
                     ),
-                    const SizedBox(height: 12),
-                    Icon(_saving ? Icons.hourglass_top : Icons.camera_alt,
-                      color: _capturing ? Colors.amber : Colors.white54, size: 48),
-                    const SizedBox(height: 8),
-                    Text(
-                      _saving ? 'Sauvegarde de la cartographie...'
-                      : _capturing
-                          ? (_presenceRatio < 0.72
-                              ? 'Place l\'objet dans la zone\n(net: ${(_presenceRatio * 100).toStringAsFixed(0)}%)'
-                              : 'Scanne le fond poncé\nMaintiens l\'objet immobile')
-                          : 'Préparation...',
-                      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                  if (_capturing && _maxZoom > _minZoom)
+                    Positioned(
+                      right: 12,
+                      top: 80,
+                      bottom: 220,
+                      child: RotatedBox(
+                        quarterTurns: 3,
+                        child: Slider(
+                          value: _zoom,
+                          min: _minZoom,
+                          max: _maxZoom,
+                          onChanged: _setZoom,
+                          activeColor: Colors.amber,
+                        ),
+                      ),
                     ),
-                    if (_capturing) ...[
-                      const SizedBox(height: 6),
-                      Text('Points: $_featureCount détectés, ${_bestKps.length} suivis',
-                        style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                      if (_stableSinceMs != null) ...[
-                        const SizedBox(height: 4),
+                  Column(children: [
+                    const Spacer(),
+                    Container(
+                      margin: const EdgeInsets.all(24), padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(16)),
+                      child: Column(children: [
+                        // Gauge globale
                         ClipRRect(
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
-                            value: (_stableDurationMs / 2000).clamp(0.0, 1.0),
-                            minHeight: 6, backgroundColor: Colors.white24,
+                            value: _saving ? 0.6 : (_stableSinceMs != null ? 0.6 * (_stableDurationMs / 2000).clamp(0.0, 1.0) : 0.0),
+                            minHeight: 16, backgroundColor: Colors.white24,
                             valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
                           ),
                         ),
-                        Text('Stabilisation... ${(_stableDurationMs / 20).toStringAsFixed(0)}%',
-                          style: const TextStyle(color: Colors.greenAccent, fontSize: 12)),
-                      ],
-                      Text('Zoom: ${_zoom.toStringAsFixed(1)}x (${_minZoom.toStringAsFixed(1)}-${_maxZoom.toStringAsFixed(1)})',
-                        style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                      Text('Netteté: ${_liveSharpness.toStringAsFixed(1)} | Calib: $_calibPct% | Floues: $_skippedBlurry',
-                        style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                    ],
+                        const SizedBox(height: 6),
+                        Text(
+                          _saving ? 'Sauvegarde... 60%' : 'Texture : ${(_stableSinceMs != null ? (_stableDurationMs / 20).toStringAsFixed(0) : '0')}%',
+                          style: const TextStyle(color: Colors.greenAccent, fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 12),
+                        Icon(_saving ? Icons.hourglass_top : Icons.camera_alt,
+                          color: _capturing ? Colors.amber : Colors.white54, size: 48),
+                        const SizedBox(height: 8),
+                        Text(
+                          _saving ? 'Sauvegarde de la cartographie...'
+                          : _capturing
+                              ? (!_focusLocked
+                                  ? 'Netteté: ${(_netteRatio * 100).toStringAsFixed(0)}% — ajuste jusqu\'à 72%'
+                                  : (_fillRatio < 0.35
+                                      ? 'Remplis la zone verte avec l\'objet\n(remplissage: ${(_fillRatio * 100).toStringAsFixed(0)}%)'
+                                      : 'Scanne le fond poncé\nMaintiens l\'objet immobile'))
+                              : 'Préparation...',
+                          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        if (_capturing) ...[
+                          const SizedBox(height: 6),
+                          Text('Points: $_featureCount détectés, ${_bestKps.length} suivis',
+                            style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                          Text('Remplissage zone: ${(_fillRatio * 100).toStringAsFixed(0)}%',
+                            style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                          if (_stableSinceMs != null) ...[
+                            const SizedBox(height: 4),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: (_stableDurationMs / 2000).clamp(0.0, 1.0),
+                                minHeight: 6, backgroundColor: Colors.white24,
+                                valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+                              ),
+                            ),
+                            Text('Stabilisation... ${(_stableDurationMs / 20).toStringAsFixed(0)}%',
+                              style: const TextStyle(color: Colors.greenAccent, fontSize: 12)),
+                          ],
+                          Text('Zoom: ${_zoom.toStringAsFixed(1)}x (${_minZoom.toStringAsFixed(1)}-${_maxZoom.toStringAsFixed(1)})',
+                            style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                          Text('Netteté: ${_liveSharpness.toStringAsFixed(1)} | Calib: $_calibPct% | Floues: $_skippedBlurry',
+                            style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                        ],
+                      ]),
+                    ),
+                    const SizedBox(height: 32),
                   ]),
-                ),
-                const SizedBox(height: 32),
-              ]),
-            ])),
+                ]);
+              },
+            ),
     );
   }
 }
@@ -523,6 +610,44 @@ class _ObjectSpotlight extends CustomPainter {
   @override bool shouldRepaint(covariant _ObjectSpotlight oldDelegate) => true;
 }
 
+class _ScanZonePainter extends CustomPainter {
+  final Rect? scanZone;
+  final int sensorOrientation;
+
+  const _ScanZonePainter({required this.scanZone, required this.sensorOrientation});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (scanZone == null) return;
+
+    // Dessiner la zone de scan réelle (celle qui correspond au traitement)
+    final zonePaint = Paint()
+      ..color = Colors.greenAccent.withOpacity(0.3)
+      ..style = PaintingStyle.fill;
+    final borderPaint = Paint()
+      ..color = Colors.greenAccent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    canvas.drawOval(scanZone!, zonePaint);
+    canvas.drawOval(scanZone!, borderPaint);
+
+    // Croix au centre
+    final centerPaint = Paint()
+      ..color = Colors.greenAccent
+      ..strokeWidth = 2;
+    final cx = scanZone!.center.dx;
+    final cy = scanZone!.center.dy;
+    const crossSize = 20.0;
+    canvas.drawLine(Offset(cx - crossSize, cy), Offset(cx + crossSize, cy), centerPaint);
+    canvas.drawLine(Offset(cx, cy - crossSize), Offset(cx, cy + crossSize), centerPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ScanZonePainter oldDelegate) =>
+      oldDelegate.scanZone != scanZone;
+}
+
 class _CircleGuidePainter extends CustomPainter {
   const _CircleGuidePainter();
   @override
@@ -533,7 +658,7 @@ class _CircleGuidePainter extends CustomPainter {
     final tickPaint = Paint()..color = Colors.white24..style = PaintingStyle.stroke..strokeWidth = 1;
     for (final angle in [0.0, 90.0, 180.0, 270.0]) {
       final rad = angle * (3.14159 / 180.0);
-      final dx = radius * cos(rad), dy = radius * sin(rad);
+      final dx = radius * math.cos(rad), dy = radius * math.sin(rad);
       canvas.drawLine(Offset(cx + dx * 0.9, cy + dy * 0.9), Offset(cx + dx * 1.1, cy + dy * 1.1), tickPaint);
     }
   }

@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
@@ -121,6 +122,184 @@ class TextureFrame {
   }
 }
 
+/// Région circulaire dans l'image caméra (coordonnées pixels image brute).
+class CameraCircleRegion {
+  final double cx;      // centre X en pixels image
+  final double cy;      // centre Y en pixels image
+  final double radius;  // rayon en pixels image
+
+  const CameraCircleRegion({required this.cx, required this.cy, required this.radius});
+}
+
+/// Calcule la région circulaire dans l'image caméra qui correspond
+/// à un cercle FIXE de 400px de diamètre (200px rayon) au centre de l'écran.
+/// Ignore circleFraction, BoxFit.cover, sensorOrientation.
+CameraCircleRegion? computeFixedCenterCircleRegion({
+  required CameraImage image,
+  required int sensorOrientation,
+  required double screenWidth,
+  required double screenHeight,
+}) {
+  final imgW = image.width.toDouble();
+  final imgH = image.height.toDouble();
+
+  // Cercle écran : centre exact, diamètre 400px (rayon 200px)
+  const double screenCircleRadius = 200.0;
+  final double screenCx = screenWidth / 2;
+  final double screenCy = screenHeight / 2;
+
+  // CameraPreview avec BoxFit.cover : l'image remplit l'écran, rognée symétriquement.
+  // Calculer l'échelle cover et l'offset.
+  final double scaleX = screenWidth / imgW;
+  final double scaleY = screenHeight / imgH;
+  final double coverScale = scaleX > scaleY ? scaleX : scaleY;
+
+  final double scaledW = imgW * coverScale;
+  final double scaledH = imgH * coverScale;
+  final double offsetX = (scaledW - screenWidth) / 2;
+  final double offsetY = (scaledH - screenHeight) / 2;
+
+  // Centre du cercle écran -> coordonnées image redimensionnée (scaled)
+  final double scaledCx = screenCx + offsetX;
+  final double scaledCy = screenCy + offsetY;
+
+  // Redimensionnée -> image brute (avant rotation capteur)
+  final double rawCx = scaledCx / coverScale;
+  final double rawCy = scaledCy / coverScale;
+  final double rawRadius = screenCircleRadius / coverScale;
+
+  // Appliquer la rotation du capteur (sensorOrientation degrés CW pour aller au portrait)
+  // L'image brute est tournée de -sensorOrientation par rapport à l'affichage portrait.
+  // Pour mapper centre écran -> image brute, on inverse la rotation.
+  double finalCx, finalCy;
+  final int steps = (sensorOrientation ~/ 90) % 4;
+  if (steps == 0) {
+    finalCx = rawCx;
+    finalCy = rawCy;
+  } else if (steps == 1) { // 90° CW
+    finalCx = rawCy;
+    finalCy = imgH - rawCx;
+  } else if (steps == 2) { // 180°
+    finalCx = imgW - rawCx;
+    finalCy = imgH - rawCy;
+  } else { // 270°
+    finalCx = imgW - rawCy;
+    finalCy = rawCx;
+  }
+
+  // Clamp dans l'image
+  final double clampedCx = finalCx.clamp(0.0, imgW - 1.0);
+  final double clampedCy = finalCy.clamp(0.0, imgH - 1.0);
+  final double maxRadius = (imgW < imgH ? imgW : imgH) / 2.0;
+  final double clampedRadius = rawRadius.clamp(1.0, maxRadius);
+
+  return CameraCircleRegion(cx: clampedCx, cy: clampedCy, radius: clampedRadius);
+}
+
+/// Calcule le ratio de netteté dans un cercle FIXE de 400px de diamètre au centre de l'écran.
+double sharpnessRatioInFixedCircle(CameraImage image, {
+  required double screenWidth,
+  required double screenHeight,
+  required int sensorOrientation,
+  required double threshold,
+}) {
+  final region = computeFixedCenterCircleRegion(
+    image: image,
+    sensorOrientation: sensorOrientation,
+    screenWidth: screenWidth,
+    screenHeight: screenHeight,
+  );
+  if (region == null) return 0.0;
+
+  try {
+    final plane = image.planes[0];
+    final bytes = plane.bytes;
+    final w = image.width;
+    final h = image.height;
+    final stride = plane.bytesPerRow;
+
+    final cx = region.cx;
+    final cy = region.cy;
+    final radius = region.radius;
+    final radiusSq = radius * radius;
+
+    int total = 0;
+    int sharp = 0;
+    const step = 2;
+
+    final yStart = (cy - radius).ceil().clamp(0, h - 1);
+    final yEnd = (cy + radius).floor().clamp(0, h - 1);
+
+    for (int y = yStart; y <= yEnd; y += step) {
+      final dy = y - cy;
+      final dySq = dy * dy;
+      final rowStart = y * stride;
+
+      final dxMax = (radiusSq - dySq);
+      if (dxMax <= 0) continue;
+      final dxLimit = math.sqrt(dxMax);
+      final xStart = (cx - dxLimit).ceil().clamp(0, w - 1);
+      final xEnd = (cx + dxLimit).floor().clamp(0, w - 1);
+
+      for (int x = xStart; x <= xEnd; x += step) {
+        total++;
+        final idx = rowStart + x;
+        if (idx + 1 < bytes.length) {
+          final diff = (bytes[idx] - bytes[idx + 1]).abs();
+          if (diff > threshold) sharp++;
+        }
+      }
+    }
+    return total == 0 ? 0.0 : sharp / total;
+  } catch (_) {
+    return 0.0;
+}
+}
+
+/// Calcule le ratio de netteté dans une zone circulaire centrale (legacy, inchangé).
+double sharpnessRatioInCircle(CameraImage image, {
+  required double circleFraction,
+  required double threshold,
+}) {
+  try {
+    final plane = image.planes[0];
+    final bytes = plane.bytes;
+    final w = image.width;
+    final h = image.height;
+    final stride = plane.bytesPerRow;
+
+    final cx = w / 2;
+    final cy = h / 2;
+    final radius = (w < h ? w : h) / 2 * circleFraction;
+    final radiusSq = radius * radius;
+
+    int total = 0;
+    int sharp = 0;
+    const step = 2;
+
+    for (int y = 0; y < h; y += step) {
+      final dy = y - cy;
+      final dySq = dy * dy;
+      final rowStart = y * stride;
+      for (int x = 0; x < w; x += step) {
+        final dx = x - cx;
+        if (dx * dx + dySq > radiusSq) continue;
+        total++;
+        final idx = rowStart + x;
+        if (idx + 1 < bytes.length) {
+          final diff = (bytes[idx] - bytes[idx + 1]).abs();
+          if (diff > threshold) sharp++;
+        }
+      }
+    }
+    return total == 0 ? 0.0 : sharp / total;
+  } catch (_) {
+    return 0.0;
+  }
+}
+
+enum FeatureExtractor { orb }
+
 /// Extracteur de features avec ORB réutilisable.
 /// La netteté est vérifiée en continu via [AdaptiveSharpnessGate].
 class TextureExtractor {
@@ -146,7 +325,12 @@ class TextureExtractor {
 
   AdaptiveSharpnessGate get sharpnessGate => _sharpnessGate;
 
-  TextureFrame? extract(CameraImage image, {bool logErrors = false}) {
+  /// Extrait les features dans la région circulaire [region] (pixels image brute).
+  /// Si [region] est null, traite l'image entière (fallback).
+  TextureFrame? extract(CameraImage image, {
+    bool logErrors = false,
+    CameraCircleRegion? region,
+  }) {
     final qs = quickSharpness(image);
     if (!_sharpnessGate.isSharp(qs)) return null;
 
@@ -154,11 +338,25 @@ class TextureExtractor {
     if (grayMat == null) return null;
 
     cv.Mat? enhanced;
+    cv.Mat? mask;
     try {
       enhanced = _clahe.apply(grayMat);
       grayMat.dispose();
 
-      final (keypoints, descriptors) = _orb.detectAndCompute(enhanced, _mask);
+// Créer un masque circulaire si région fournie
+      if (region != null) {
+        mask = cv.Mat.zeros(enhanced.rows, enhanced.cols, cv.MatType.CV_8UC1);
+        cv.circle(
+          mask,
+          cv.Point(region.cx.round(), region.cy.round()),
+          region.radius.round(),
+          cv.Scalar.all(255),
+          thickness: cv.FILLED,
+        );
+      }
+
+      final (keypoints, descriptors) = _orb.detectAndCompute(enhanced, mask ?? _mask);
+      mask?.dispose();
       enhanced.dispose();
       return TextureFrame(qs, descriptors, keypoints.toList());
     } catch (e) {
@@ -168,6 +366,7 @@ class TextureExtractor {
       }
       grayMat.dispose();
       enhanced?.dispose();
+      mask?.dispose();
       return null;
     }
   }
@@ -178,5 +377,3 @@ class TextureExtractor {
     _clahe.dispose();
   }
 }
-
-enum FeatureExtractor { orb }

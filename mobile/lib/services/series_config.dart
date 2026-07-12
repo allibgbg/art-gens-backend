@@ -13,7 +13,7 @@ class SeriesScanConfig {
 /// Presets par série — VALEURS DE DÉPART À CALIBRER, pas encore vérifiées sur device réel.
 const Map<String, SeriesScanConfig> kSeriesScanConfigs = {
   '2': SeriesScanConfig(zoom: 2.0, circleFraction: 0.55),
-  '5': SeriesScanConfig(zoom: 1.3, circleFraction: 0.6),
+  '5': SeriesScanConfig(zoom: 2.0, circleFraction: 0.45),
 };
 
 /// Preset par défaut si le chiffre n'a pas pu être détecté.

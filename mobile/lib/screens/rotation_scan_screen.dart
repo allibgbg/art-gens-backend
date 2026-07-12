@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../services/multi_angle_scan.dart';
@@ -81,7 +82,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     if (_cameraController == null || _scanning) return;
     _scanner?.cancel();
     setState(() { _scanning = true; _done = false; _scanner = null; _error = null; });
-    final scanner = MultiAngleScanner(_cameraController!, gridRows: 5, gridCols: 5);
+    final scanner = MultiAngleScanner(_cameraController!);
     _scanner = scanner;
 
     scanner.onProgress = (cov, conf) {
@@ -169,21 +170,9 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                   child: CameraPreview(_cameraController!),
                 ),
               if (!_isCameraReady) const Center(child: CircularProgressIndicator()),
-              Container(
-                width: double.infinity, height: double.infinity,
-                decoration: const BoxDecoration(
-                  color: Color.fromRGBO(255, 255, 255, 0.15),
-                ),
-                child: Center(
-                  child: Container(
-                    width: 400, height: 400,
-                    decoration: BoxDecoration(
-                      color: Colors.transparent,
-                      borderRadius: BorderRadius.circular(200),
-                      border: Border.all(color: Colors.white, width: 3),
-                    ),
-                  ),
-                ),
+              CustomPaint(
+                painter: _CenterCircleGuide(),
+                size: Size(constraints.maxWidth, constraints.maxHeight),
               ),
               Column(children: [
                 const Spacer(),
@@ -236,4 +225,29 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
             ])),
     );
   }
+}
+
+class _CenterCircleGuide extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double cx = size.width / 2;
+    final double cy = size.height / 2;
+    const double radius = 200.0; // 400px diameter
+    final paint = Paint()
+      ..color = Colors.white38
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5;
+    canvas.drawCircle(Offset(cx, cy), radius, paint);
+    final tickPaint = Paint()
+      ..color = Colors.white24
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    for (final angle in [0.0, 90.0, 180.0, 270.0]) {
+      final rad = angle * (3.14159 / 180.0);
+      final dx = radius * math.cos(rad), dy = radius * math.sin(rad);
+      canvas.drawLine(Offset(cx + dx * 0.9, cy + dy * 0.9), Offset(cx + dx * 1.1, cy + dy * 1.1), tickPaint);
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _CenterCircleGuide oldDelegate) => false;
 }

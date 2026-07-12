@@ -57,7 +57,7 @@ def create_piece(data: PieceCreate, db: Session = Depends(get_db), current_user:
     return PieceService.create_piece(db, data.model_dump(), current_user.id)
 
 
-_PINCEAUX_BY_SERIES = {2: 40, 5: 100, 10: 200}
+    _PINCEAUX_BY_SERIES = {2: 40, 5: 100}
 
 
 @router.post("/draft")
