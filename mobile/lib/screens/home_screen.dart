@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/pieces_provider.dart';
 import '../models/piece.dart';
+import 'object_3d_capture_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -65,32 +66,61 @@ class _CollectionTabState extends State<_CollectionTab> {
       appBar: AppBar(title: const Text('Ma collection')),
       body: Consumer<PiecesProvider>(
         builder: (_, provider, __) {
+          final children = <Widget>[
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Card(
+                color: Colors.amber.shade100,
+                child: ListTile(
+                  leading: const Icon(Icons.view_in_ar, size: 32),
+                  title: const Text('Outil scan 3D (photos live)'),
+                  subtitle: const Text('Capture l\'objet sous plusieurs angles'),
+                  trailing: const Icon(Icons.arrow_forward_ios),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const Object3DCaptureScreen()),
+                  ),
+                ),
+              ),
+            ),
+          ];
           if (provider.myPieces.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.inventory_2, size: 64, color: Colors.grey[400]),
-                  const SizedBox(height: 16),
-                  Text('Aucun objet dans ta collection',
-                      style: Theme.of(context).textTheme.titleMedium),
-                ],
+            children.add(
+              Expanded(
+                child: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.inventory_2, size: 64, color: Colors.grey[400]),
+                      const SizedBox(height: 16),
+                      Text('Aucun objet dans ta collection',
+                          style: Theme.of(context).textTheme.titleMedium),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          } else {
+            children.add(const SizedBox(height: 8));
+            children.add(
+              Expanded(
+                child: GridView.builder(
+                  padding: const EdgeInsets.all(8),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    childAspectRatio: 0.8,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                  ),
+                  itemCount: provider.myPieces.length,
+                  itemBuilder: (_, i) => _PieceCard(piece: provider.myPieces[i]),
+                ),
               ),
             );
           }
           return RefreshIndicator(
             onRefresh: () => provider.loadMyPieces(),
-            child: GridView.builder(
-              padding: const EdgeInsets.all(8),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                childAspectRatio: 0.8,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-              ),
-              itemCount: provider.myPieces.length,
-              itemBuilder: (_, i) => _PieceCard(piece: provider.myPieces[i]),
-            ),
+            child: Column(children: children),
           );
         },
       ),
