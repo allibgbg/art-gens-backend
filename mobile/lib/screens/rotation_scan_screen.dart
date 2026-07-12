@@ -34,6 +34,13 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   String? _digitValue;
   String? _pieceId;
 
+  // Stabilité du chiffre : on n'accepte un chiffre détecté qu'après N
+  // détections cohérentes sur les dernières frames. Évite les faux positifs
+  // sur le fond (qui clignotent d'une frame à l'autre).
+  final List<String?> _digitBuf = [];
+  static const int _digitBufLen = 8;
+  static const int _digitMinCount = 5;
+
   double _screenWidth = 0.0;
   double _screenHeight = 0.0;
 
@@ -50,7 +57,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   int _baseCheckCounter = 0;
   double _lastFillRatio = 0.0;
 
-  late CoverageTracker _tracker;
+  CoverageTracker _tracker = CoverageTracker(4, 4);
   final AdaptiveSharpnessGate _sharpnessGate = AdaptiveSharpnessGate();
 
   @override
@@ -150,10 +157,24 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     );
 
     // 1) Chiffre en relief : repère de rotation, affiché à l'écran.
+    // On n'accepte un chiffre qu'après détections cohérentes (stabilité temp.)
+    // pour éliminer les faux positifs sur le fond qui clignotent.
     final det = detectDigitFromImage(image, enforceCentering: false);
     if (det.value != null) {
-      _digitValue = det.value;
-      if (mounted) setState(() {});
+      _digitBuf.add(det.value);
+      if (_digitBuf.length > _digitBufLen) _digitBuf.removeAt(0);
+      final counts = <String, int>{};
+      for (final v in _digitBuf) {
+        if (v != null) counts[v] = (counts[v] ?? 0) + 1;
+      }
+      String? stable;
+      counts.forEach((k, c) {
+        if (c >= _digitMinCount) stable ??= k;
+      });
+      if (stable != null && stable != _digitValue) {
+        _digitValue = stable;
+        if (mounted) setState(() {});
+      }
     }
     _tracker.addDigit(det, _digitValue, image.width);
 
@@ -164,7 +185,8 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     }
 
     // 3) Accumulation rotation / couleur (corps de l'objet).
-    if (region != null) {
+    // Armée seulement une fois le chiffre détecté : évite d'accumuler le fond.
+    if (region != null && _digitValue != null) {
       final sig = SpatialSignature.extract(image);
       _tracker.addFrame(sig);
     }
@@ -201,6 +223,10 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
        _framesProcessed >= 1200);
 
   void _checkAndCaptureBase(CameraImage image, CameraCircleRegion region) {
+    // La base appartient au même objet que le chiffre gravé : on n'arme la
+    // capture de la base QUE si un chiffre a déjà été détecté de façon stable.
+    // Sur un fond vide le chiffre ne se stabilise jamais -> pas de faux positif.
+    if (_digitValue == null) return;
     final frame = _baseExtractor.extract(image, region: region, logErrors: false);
     if (frame == null) {
       _lastFillRatio = 0.0;
@@ -433,18 +459,20 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                           size: 48,
                         ),
                         const SizedBox(height: 8),
-                        Text(
-                          _saving
-                              ? 'Sauvegarde des motifs...'
-                              : _baseCaptured
-                                  ? 'Base capturée ✓ — tourne l\'objet pour la rotation'
-                                  : 'Cadre la base (fond poncé) dans la zone verte',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+                          Text(
+                            _saving
+                                ? 'Sauvegarde des motifs...'
+                                : _baseCaptured
+                                    ? 'Base capturée ✓ — tourne l\'objet pour la rotation'
+                                    : _digitValue == null
+                                        ? 'Cadre l\'objet : détecte le chiffre gravé (2/5)'
+                                        : 'Montre la base (fond poncé) dans la zone verte',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
-                        ),
                         if (_scanning) ...[
                           const SizedBox(height: 6),
                           Text(
