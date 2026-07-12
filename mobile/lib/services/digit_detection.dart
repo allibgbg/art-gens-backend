@@ -61,108 +61,88 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
     kernel.dispose();
 
     final (contours, _) = cv.findContours(cleaned, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    double maxArea = 0;
-    cv.VecPoint? best;
-    double totalArea = 0;
-    int bigCount = 0;
-    for (final c in contours) {
-      final a = cv.contourArea(c);
-      totalArea += a;
-      if (a > maxArea) { maxArea = a; best = c; }
-      if (a > imgArea * 0.005) bigCount++;
-    }
-    if (best == null || best.length < 10) {
-      digitDebug = 'aucun contour';
-      cleaned.dispose(); contours.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
-    // Scène TRÈS chargée (décor, beaucoup d'objets) : repli de sécurité pour
-    // éviter de proposer un chiffre sur un fond occupé. Seuil volontairement
-    // haut ; la justesse finale repose sur la confirmation + le template serveur.
-    if (bigCount > 40) {
-      digitDebug = 'scène chargée bigCount=$bigCount';
-      cleaned.dispose(); contours.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
-
-    final rect = cv.boundingRect(best);
-    contours.dispose();
-
-    final areaRatio = maxArea / imgArea;
-    final aspect = rect.width / math.max(1, rect.height);
-    // Un chiffre gravé en creux apparaît comme une zone sombre PLEINE après
-    // seuillage -> solidité ÉLEVÉE (~0.6-0.95), pas un trait fin. On autorise
-    // donc une large plage de solidité.
-    final solidity = maxArea / (rect.width * rect.height);
-    // Filtres LARGES : on veut surtout ne pas manquer le vrai chiffre. La
-    // validation vient de la confirmation utilisateur + du template serveur.
-    if (areaRatio < 0.002 || areaRatio > 0.6) {
-      digitDebug = 'rejet area=$areaRatio';
-      cleaned.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
-    if (aspect < 0.15 || aspect > 3.0) {
-      digitDebug = 'rejet aspect=$aspect';
-      cleaned.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
-    if (solidity < 0.02 || solidity > 0.98) {
-      digitDebug = 'rejet solidity=$solidity';
-      cleaned.dispose();
-      return     const DigitDetectionResult(null, 0, null, null);
-    }
-
-    if (enforceCentering) {
-      final cx = rect.x + rect.width / 2;
-      final cy = rect.y + rect.height / 2;
-      final dC = math.sqrt(
-        (cx - gray.cols / 2) * (cx - gray.cols / 2) +
-        (cy - gray.rows / 2) * (cy - gray.rows / 2),
-      );
-      if (dC > math.min(gray.cols, gray.rows) * 0.40) {
-        cleaned.dispose();
-        return     const DigitDetectionResult(null, 0, null, null);
-      }
-    }
-
-    final roi = cleaned.region(rect);
-    cleaned.dispose();
-
-    // Moments de Hu sur le masque binaire du chiffre (dartcv4 n'exporte pas
-    // HuMoments -> calcul manuel à partir des moments normalisés).
-    final m = cv.moments(roi, binaryImage: true);
-    roi.dispose();
-    final nu20 = m.nu20, nu02 = m.nu02, nu11 = m.nu11;
-    final nu30 = m.nu30, nu12 = m.nu12, nu21 = m.nu21, nu03 = m.nu03;
-    m.dispose();
-
-    double sq(double x) => x * x;
-    final hu = <double>[
-      nu20 + nu02,
-      sq(nu20 - nu02) + 4 * sq(nu11),
-      sq(nu30 - 3 * nu12) + sq(3 * nu21 - nu03),
-      sq(nu30 + nu12) + sq(nu21 + nu03),
-      (nu30 - 3 * nu12) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
-          + (3 * nu21 - nu03) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
-      (nu20 - nu02) * (sq(nu30 + nu12) - sq(nu21 + nu03))
-          + 4 * nu11 * (nu30 + nu12) * (nu21 + nu03),
-      (3 * nu21 - nu03) * (nu30 + nu12) * (sq(nu30 + nu12) - 3 * sq(nu21 + nu03))
-          - (nu30 - 3 * nu12) * (nu21 + nu03) * (3 * sq(nu30 + nu12) - sq(nu21 + nu03)),
-    ];
-    final huLog = hu.map((v) => -v.sign * math.log(v.abs() + 1e-10)).toList();
-    // Seules les 4 premières composantes de Hu sont stables sur de petits
-    // chiffres gravés (limite connue des moments de Hu).
-    final huLogUsed = huLog.sublist(0, 4);
 
     // Références calibrées sur vrais moules (séries 2 et 5 uniquement).
-    const ref2 = [-0.91, -0.42, -1.62, -0.47, 0.0, 0.0, 0.0];
-    const ref5 = [0.57, 1.99, 4.78, 5.38, 0.0, 0.0, 0.0];
-
+    const ref2 = [-0.91, -0.42, -1.62, -0.47];
+    const ref5 = [0.57, 1.99, 4.78, 5.38];
+    double sq(double x) => x * x;
     double huDist(List<double> a, List<double> b) {
       double s = 0;
       for (int i = 0; i < 4; i++) s += sq(a[i] - b[i]);
       return math.sqrt(s);
     }
+
+    // On cherche le chiffre parmi TOUS les contours (pas seulement le plus
+    // grand) : sur un objet brillant, un reflet spéculaire peut être le plus
+    // gros contour sans être le chiffre. On garde le contour dont la forme
+    // ressemble le plus à un chiffre moulé (distance Hu minimale).
+    double bestDist = double.infinity;
+    cv.VecPoint? best;
+    cv.Rect? bestRect;
+    List<double>? bestHu;
+    String bestGuess = '5';
+    double bestArea = 0, bestAspect = 0, bestSol = 0;
+
+    for (final c in contours) {
+      final a = cv.contourArea(c);
+      if (a < imgArea * 0.0015) continue; // bruit
+      if (a > imgArea * 0.4) continue; // trop grand = pas un chiffre
+      final r = cv.boundingRect(c);
+      final aspect = r.width / math.max(1, r.height);
+      if (aspect < 0.15 || aspect > 3.0) continue;
+      final solidity = a / (r.width * r.height);
+      if (solidity < 0.02 || solidity > 0.98) continue;
+      final roi = cleaned.region(r);
+      final m = cv.moments(roi, binaryImage: true);
+      roi.dispose();
+      final nu20 = m.nu20, nu02 = m.nu02, nu11 = m.nu11;
+      final nu30 = m.nu30, nu12 = m.nu12, nu21 = m.nu21, nu03 = m.nu03;
+      m.dispose();
+      final hu = <double>[
+        nu20 + nu02,
+        sq(nu20 - nu02) + 4 * sq(nu11),
+        sq(nu30 - 3 * nu12) + sq(3 * nu21 - nu03),
+        sq(nu30 + nu12) + sq(nu21 + nu03),
+      ];
+      final huLog = hu.map((v) => -v.sign * math.log(v.abs() + 1e-10)).toList();
+      final huLogUsed = huLog.sublist(0, 4);
+      double d;
+      String guess;
+      if (huLogUsed[2] > 0) {
+        guess = '5';
+        d = huDist(huLogUsed, ref5);
+      } else if (huLogUsed[2] < 0) {
+        guess = '2';
+        d = huDist(huLogUsed, ref2);
+      } else {
+        final d2 = huDist(huLogUsed, ref2);
+        final d5 = huDist(huLogUsed, ref5);
+        guess = d2 < d5 ? '2' : '5';
+        d = math.min(d2, d5);
+      }
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+        bestRect = r;
+        bestHu = huLogUsed;
+        bestGuess = guess;
+        bestArea = a;
+        bestAspect = aspect;
+        bestSol = solidity;
+      }
+      if (bestDist < 0.3) break; // match quasi parfait, on arrête
+    }
+    contours.dispose();
+
+    if (best == null) {
+      digitDebug = 'aucun contour plausible';
+      cleaned.dispose();
+      return const DigitDetectionResult(null, 0, null, null);
+    }
+    final rect = bestRect!;
+    final areaRatio = bestArea / imgArea;
+    final huLogUsed = bestHu!;
+    cleaned.dispose();
 
     // Mode authentification : si un template du chiffre moulé a été confirmé,
     // on exige une correspondance TRÈS serrée avec CE template précis. Un
@@ -189,22 +169,10 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
     // Sans template confirmé : proposition générique (l'utilisateur confirmera).
     // La 3e composante de Hu (hu2, index 2) est un discriminant quasi parfait
     // sur les échantillons réels (5 > 0, 2 < 0).
-    String guess;
-    double bestDist;
-    if (huLogUsed[2] > 0) {
-      guess = '5';
-      bestDist = huDist(huLogUsed, ref5);
-    } else if (huLogUsed[2] < 0) {
-      guess = '2';
-      bestDist = huDist(huLogUsed, ref2);
-    } else {
-      final d2 = huDist(huLogUsed, ref2);
-      final d5 = huDist(huLogUsed, ref5);
-      guess = d2 < d5 ? '2' : '5';
-      bestDist = math.min(d2, d5);
-    }
+    final guess = bestGuess;
     final conf = (1.0 - bestDist / 10.0).clamp(0.0, 1.0);
-    digitDebug = 'prop $guess conf=$conf area=$areaRatio aspect=$aspect sol=$solidity';
+    digitDebug =
+        'prop $guess conf=${conf.toStringAsFixed(3)} area=$areaRatio aspect=${bestAspect.toStringAsFixed(2)} sol=${bestSol.toStringAsFixed(2)}';
 
     // Rejeter si pas assez confiant (évite les faux positifs sur le fond).
     if (conf < 0.6) return const DigitDetectionResult(null, 0, null, null);

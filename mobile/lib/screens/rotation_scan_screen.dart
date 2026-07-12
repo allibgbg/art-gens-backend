@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:camera/camera.dart';
+import 'package:opencv_dart/opencv_dart.dart' as cv;
 import '../services/texture_extraction.dart';
 import '../services/color_extraction.dart';
 import '../services/digit_detection.dart';
@@ -36,6 +38,8 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   bool _confirming = false; // appel serveur de vérification en cours
   List<double>? _lastDetHu; // signature Hu du dernier chiffre détecté
   String _digitDebug = ''; // métriques de la dernière tentative de détection
+  bool _captureRequested = false; // capture debug demandée
+  String _captureText = ''; // résultat de la capture (ASCII + métriques)
   String? _pieceId;
 
   // Stabilité du chiffre : on n'accepte un chiffre détecté qu'après N
@@ -185,6 +189,10 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
     }
     if (det.hu != null) _lastDetHu = det.hu;
     _digitDebug = digitDebug;
+    if (_captureRequested) {
+      _captureRequested = false;
+      _runCapture(image, det);
+    }
     _tracker.addDigit(det, _digitValue, image.width);
 
     // 2) Base (fond poncé) : détection throttlée, capture une seule fois.
@@ -217,6 +225,79 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
         _fillRatioDisplay = _lastFillRatio;
       });
     }
+  }
+
+  void _requestCapture() {
+    _captureRequested = true;
+  }
+
+  void _runCapture(CameraImage image, DigitDetectionResult det) {
+    final gray = yPlaneToGrayMat(image);
+    if (gray == null) return;
+    cv.Mat region;
+    String zone;
+    if (det.box != null) {
+      region = gray.region(det.box!);
+      zone = 'chiffre détecté box=${det.box}';
+    } else {
+      // Pas de chiffre détecté : on capture la zone centrale pour voir ce qu'il
+      // y a à l'écran.
+      final cw = (gray.cols * 0.5).toInt();
+      final ch = (gray.rows * 0.5).toInt();
+      final x = ((gray.cols - cw) / 2).toInt();
+      final y = ((gray.rows - ch) / 2).toInt();
+      region = gray.region(cv.Rect(x, y, cw, ch));
+      zone = 'AUCUN chiffre détecté -> centre de l\'image';
+    }
+    gray.dispose();
+    final ascii = _matToAscii(region);
+    region.dispose();
+
+    final sb = StringBuffer();
+    sb.writeln('=== CAPTURE CHIFFRE (debug) ===');
+    sb.writeln(zone);
+    sb.writeln('value=${det.value}  confidence=${det.confidence.toStringAsFixed(3)}');
+    sb.writeln('digitDebug=$digitDebug');
+    sb.writeln('hu(4)=${det.hu}');
+    sb.writeln('glyphe (gris, ${ascii.split('\n').length} lignes) :');
+    sb.writeln(ascii);
+    final text = sb.toString();
+    if (mounted) {
+      setState(() => _captureText = text);
+      Clipboard.setData(ClipboardData(text: text));
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Capture chiffre'),
+          content: SingleChildScrollView(
+            child: SelectableText(text, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Fermer'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  // Rendu ASCII d'une matrice grayscale (intensité -> caractère).
+  String _matToAscii(cv.Mat m, {int cols = 30, int rows = 30}) {
+    const ramp = '@%#*+=-:. ';
+    final r = cv.resize(m, (cols, rows));
+    final buf = StringBuffer();
+    for (int y = 0; y < rows; y++) {
+      for (int x = 0; x < cols; x++) {
+        final v = r.atU8(y, i1: x);
+        final idx = (v / 255 * (ramp.length - 1)).round().clamp(0, ramp.length - 1);
+        buf.write(ramp[idx]);
+      }
+      buf.writeln();
+    }
+    r.dispose();
+    return buf.toString();
   }
 
   double _displayCoverage() {
@@ -458,6 +539,19 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                   CustomPaint(
                     painter: _CenterCircleGuide(),
                     size: Size(constraints.maxWidth, constraints.maxHeight),
+                  ),
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: ElevatedButton(
+                      onPressed: _requestCapture,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amber,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      ),
+                      child: const Text('Capturer le chiffre', style: TextStyle(fontSize: 12)),
+                    ),
                   ),
                   Column(children: [
                     const Spacer(),
