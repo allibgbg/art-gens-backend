@@ -170,7 +170,7 @@ class CoverageTracker {
   int _totalFrames = 0;
   final int _targetFrames;
 
-  CoverageTracker(this.rows, this.cols, {int targetFrames = 75})
+  CoverageTracker(this.rows, this.cols, {int targetFrames = 400})
       : _targetFrames = targetFrames,
         _zoneBins = List.generate(
           rows, (_) => List.generate(cols, (_) => <int>{}));
@@ -198,10 +198,11 @@ class CoverageTracker {
     return coverage;
   }
 
-  // La couverture reflète le nombre de frames nettes collectées pendant la
-  // rotation de l'objet (proxy de « surface scannée ») plutôt que la diversité
-  // des bins de couleur : un objet de teinte uniforme saturait sinon à quelques
-  // bins et le scan restait bloqué même en tournant l'objet.
+  // La couverture reflète la quantité de données (frames nettes) accumulées
+  // pendant le scan. On la garde volontairement élevée (targetFrames = 400)
+  // pour forcer l'accumulation d'un maximum de données : le scan ne culmine
+  // pas en quelques secondes. La diversité des bins de couleur n'est pas
+  // utilisée comme proxy (un objet de teinte uniforme saturait sinon).
   double get coverage => (_totalFrames / _targetFrames).clamp(0.0, 1.0);
 
   bool get isStable => _framesSinceNew >= 5;
