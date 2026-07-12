@@ -7,8 +7,8 @@ import 'package:opencv_dart/opencv_dart.dart' as cv;
 import '../services/texture_extraction.dart';
 import '../services/color_extraction.dart';
 import '../services/digit_detection.dart';
-import '../services/api_client.dart';
-import 'package:provider/provider.dart';
+import '../services/egg_vault.dart';
+import '../services/egg_auth.dart';
 import 'egg_fiche_screen.dart';
 
 /// Écran « Vérifier un œuf » : scan on-device (chiffre + base + couleur) puis
@@ -56,6 +56,7 @@ class _EggVerifyScreenState extends State<EggVerifyScreen> {
   // Signature de base sérialisée pour l'identification.
   Map<String, dynamic>? _candidateBase;
   bool _identifying = false;
+  Map<String, dynamic>? _enrollData;
 
   @override
   void initState() {
@@ -286,13 +287,23 @@ class _EggVerifyScreenState extends State<EggVerifyScreen> {
       _identifying = true;
     });
     try {
-      final api = context.read<ApiClient>();
-      final result = await api.identifyEgg(
-        value: _digitValue!,
-        hu: _lastDetHu ?? [],
-        textureSignature: _candidateBase!,
-        colorSignature: _tracker.toSignatureJson(),
+      final refs = await EggVault.loadAll();
+      final result = EggAuth.identify(
+        digit: _digitValue!,
+        candidateHu: _lastDetHu ?? [],
+        candidateBase: EggBaseSample.fromJson(_candidateBase!),
+        candidateColor: _tracker.toSignatureJson(),
+        references: refs,
       );
+      // Données pour enregistrer une référence si aucune ne correspond.
+      Map<String, dynamic>? enroll;
+      if (result.decision == 'inconnu') {
+        enroll = {
+          'hu': _lastDetHu ?? [],
+          'base': _candidateBase!,
+          'color': _tracker.toSignatureJson(),
+        };
+      }
       if (mounted) {
         final cam = _cameraController;
         _cameraController = null;
@@ -304,6 +315,7 @@ class _EggVerifyScreenState extends State<EggVerifyScreen> {
             builder: (_) => EggFicheScreen(
               result: result,
               digitValue: _digitValue,
+              enrollData: enroll,
             ),
           ),
         );
