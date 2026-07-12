@@ -2,15 +2,21 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import '../services/multi_angle_scan.dart';
+import '../services/texture_extraction.dart';
+import '../services/color_extraction.dart';
+import '../services/digit_detection.dart';
 import '../services/api_client.dart';
 import 'package:provider/provider.dart';
 import 'finalize_piece_screen.dart';
 
+/// Scan unifié (remplace les anciens scans 1/2/3) :
+/// - détecte le chiffre en relief (2/5) sur chaque frame (repère de rotation),
+/// - capture la base (fond poncé) quand elle remplit la zone centrale,
+/// - accumule la signature couleur / rotation du corps de l'objet,
+/// - crée le draft de pièce (chiffre + texture de base) puis, à la fin,
+///   patch la signature couleur et lance la finalisation.
 class RotationScanScreen extends StatefulWidget {
-  final String pieceId;
-  final String? digitGuess;
-  const RotationScanScreen({super.key, required this.pieceId, this.digitGuess});
+  const RotationScanScreen({super.key});
 
   @override
   State<RotationScanScreen> createState() => _RotationScanScreenState();
@@ -18,21 +24,34 @@ class RotationScanScreen extends StatefulWidget {
 
 class _RotationScanScreenState extends State<RotationScanScreen> {
   CameraController? _cameraController;
+  int _sensorOrientation = 0;
   bool _isCameraReady = false;
   bool _scanning = false;
   bool _done = false;
   bool _saving = false;
-  double _coverage = 0;
-  double _confidence = 0;
+  bool _creatingDraft = false;
+  String? _error;
+  String? _digitValue;
+  String? _pieceId;
+
+  double _screenWidth = 0.0;
+  double _screenHeight = 0.0;
+
   int _framesProcessed = 0;
   double _liveSharpness = 0;
-  double _maxSharpness = 0;
   int _calibPct = 0;
   int _skippedBlurry = 0;
-  String? _digitValue;
-  MultiAngleScanner? _scanner;
-  String? _error;
-  ScanResult? _result;
+
+  // Base (fond poncé)
+  final TextureExtractor _baseExtractor = TextureExtractor(nFeatures: 500);
+  bool _baseCaptured = false;
+  TextureFrame? _baseFrame;
+  int? _baseStableSince;
+  int _baseCheckCounter = 0;
+  double _lastFillRatio = 0.0;
+
+  late CoverageTracker _tracker;
+  final AdaptiveSharpnessGate _sharpnessGate = AdaptiveSharpnessGate();
 
   @override
   void initState() {
@@ -42,11 +61,15 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
 
   Future<void> _initCamera() async {
     final cameras = await availableCameras();
-    if (cameras.isEmpty) { setState(() => _error = 'Aucune caméra disponible'); return; }
+    if (cameras.isEmpty) {
+      setState(() => _error = 'Aucune caméra disponible');
+      return;
+    }
     final cam = cameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.back,
       orElse: () => cameras.first,
     );
+    _sensorOrientation = cam.sensorOrientation;
     try {
       final controller = CameraController(cam, ResolutionPreset.medium);
       await controller.initialize();
@@ -55,19 +78,25 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
         final minZ = await controller.getMinZoomLevel();
         final maxZ = await controller.getMaxZoomLevel();
         await controller.setZoomLevel(1.4.clamp(minZ, maxZ));
-        // Même système que le scan 1 (détection chiffre) : on reste en mode auto
-        // et on pointe la MAP au centre. Pas de FocusMode.locked (inefficace
-        // sur CameraX et qui avorte la mise au point).
         await controller.setFocusPoint(const Offset(0.5, 0.5));
       } catch (_) {}
       if (mounted) {
-        setState(() { _cameraController = controller; _isCameraReady = true; _error = null; });
+        setState(() {
+          _cameraController = controller;
+          _isCameraReady = true;
+          _error = null;
+        });
         _startScan();
       }
     } catch (e) {
       if (mounted) {
         setState(() => _error = 'Erreur caméra: $e');
-        Future.delayed(const Duration(seconds: 2), () { if (mounted) { setState(() => _error = null); _initCamera(); } });
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) {
+            setState(() => _error = null);
+            _initCamera();
+          }
+        });
       }
     }
   }
@@ -87,155 +116,366 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
 
   Future<void> _startScan() async {
     if (_cameraController == null || _scanning) return;
-    setState(() { _scanning = true; _done = false; _error = null; });
-    // Un seul scanner pour toute la durée du scan éternel.
-    final scanner = _scanner ??= MultiAngleScanner(
-      _cameraController!,
-      expectedDigit: widget.digitGuess,
-    );
+    setState(() {
+      _scanning = true;
+      _done = false;
+      _error = null;
+    });
+    _tracker = CoverageTracker(4, 4);
+    _sharpnessGate.reset();
 
-    scanner.onProgress = (cov, conf) {
-      if (mounted) setState(() { _coverage = cov; _confidence = conf; });
-    };
-    scanner.onDigit = (value, digitCov) {
-      if (mounted && value != null) setState(() => _digitValue = value);
-    };
-    scanner.onSharpness = (qs, max, calibPct, skipped, processed) {
-      if (mounted) setState(() {
-        _liveSharpness = qs; _maxSharpness = max; _calibPct = calibPct;
-        _skippedBlurry = skipped; _framesProcessed = processed;
-      });
-    };
-
-    // Scan « éternel » : le flux tourne jusqu'à ce que la couverture suffisante
-    // soit atteinte (le scanner ne s'arrête que sur isComplete). On n'interrompt
-    // ni ne recommence — l'utilisateur continue simplement à tourner l'objet.
-    _result = await scanner.start();
-
-    if (!mounted) return;
-
-    setState(() { _scanning = false; _done = true; });
-    await Future.delayed(const Duration(seconds: 2));
-    _saveAndNext();
+    try {
+      await _cameraController!.startImageStream(_onImage);
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Erreur flux: $e');
+    }
   }
 
-  Future<void> _saveAndNext() async {
-    if (_result == null) return;
-    setState(() => _saving = true);
-    try {
-      final api = context.read<ApiClient>();
-      await api.patch('/pieces/${widget.pieceId}', body: {
-        'color_signature': _result!.spatialSignature,
+  void _onImage(CameraImage image) {
+    if (!_scanning || _done) return;
+
+    final qs = quickSharpness(image);
+    if (!_sharpnessGate.isSharp(qs)) {
+      _skippedBlurry++;
+      if (mounted) setState(() {});
+      return;
+    }
+    _framesProcessed++;
+
+    final region = computeFixedCenterCircleRegion(
+      image: image,
+      sensorOrientation: _sensorOrientation,
+      screenWidth: _screenWidth,
+      screenHeight: _screenHeight,
+    );
+
+    // 1) Chiffre en relief : repère de rotation, affiché à l'écran.
+    final det = detectDigitFromImage(image, enforceCentering: false);
+    if (det.value != null) {
+      _digitValue = det.value;
+      if (mounted) setState(() {});
+    }
+    _tracker.addDigit(det, _digitValue, image.width);
+
+    // 2) Base (fond poncé) : détection throttlée, capture une seule fois.
+    _baseCheckCounter++;
+    if (!_baseCaptured && region != null && _baseCheckCounter % 5 == 0) {
+      _checkAndCaptureBase(image, region);
+    }
+
+    // 3) Accumulation rotation / couleur (corps de l'objet).
+    if (region != null) {
+      final sig = SpatialSignature.extract(image);
+      _tracker.addFrame(sig);
+    }
+
+    // 4) Création du draft dès qu'on a chiffre + base.
+    if (_digitValue != null && _baseCaptured && _pieceId == null && !_creatingDraft) {
+      _createDraft();
+    }
+
+    // 5) Finalisation.
+    if (_canFinish() && !_done) {
+      _finishScan();
+    }
+
+    if (mounted) {
+      setState(() {
+        _liveSharpness = qs;
+        _calibPct = _sharpnessGate.calibrationProgress;
+        _fillRatioDisplay = _lastFillRatio;
       });
-      if (mounted) {
-        final cam = _cameraController;
-        _cameraController = null;
-        await cam?.dispose();
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => FinalizePieceScreen(
-            pieceId: widget.pieceId, digitGuess: widget.digitGuess,
-          )),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _saving = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e')));
+    }
+  }
+
+  double _displayCoverage() {
+    final rot = _tracker.coverage;
+    // La base mapée compte pour 50% de l'objet ; le reste vient de la rotation.
+    return _baseCaptured ? (0.5 + 0.5 * rot).clamp(0.0, 1.0) : rot;
+  }
+
+  bool _canFinish() =>
+      _baseCaptured &&
+      _pieceId != null &&
+      ((_tracker.isStable && _displayCoverage() >= 0.9) ||
+       _framesProcessed >= 1200);
+
+  void _checkAndCaptureBase(CameraImage image, CameraCircleRegion region) {
+    final frame = _baseExtractor.extract(image, region: region, logErrors: false);
+    if (frame == null) {
+      _lastFillRatio = 0.0;
+      return;
+    }
+    double minX = double.infinity, minY = double.infinity, maxX = 0, maxY = 0;
+    for (final kp in frame.keypoints) {
+      if (kp.x < minX) minX = kp.x;
+      if (kp.x > maxX) maxX = kp.x;
+      if (kp.y < minY) minY = kp.y;
+      if (kp.y > maxY) maxY = kp.y;
+    }
+    final kpArea = (maxX - minX) * (maxY - minY);
+    final circleArea = math.pi * region.radius * region.radius;
+    final fill = circleArea > 0 ? (kpArea / circleArea).clamp(0.0, 1.0) : 0.0;
+    _lastFillRatio = fill;
+
+    if (fill < 0.70 || frame.keypoints.length < 30) {
+      _baseStableSince = null;
+      frame.dispose();
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _baseStableSince ??= now;
+    frame.dispose();
+    if (now - _baseStableSince! >= 1500) {
+      final cap = _baseExtractor.extract(image, region: region, logErrors: true);
+      if (cap != null && cap.keypoints.length >= 30) {
+        _baseFrame?.dispose();
+        _baseFrame = cap;
+        _baseCaptured = true;
+        if (mounted) setState(() {});
       }
     }
   }
 
-  @override
-  void dispose() { _cameraController?.dispose(); _scanner?.cancel(); super.dispose(); }
+  Future<void> _createDraft() async {
+    if (_baseFrame == null || _digitValue == null) return;
+    _creatingDraft = true;
+    try {
+      final descMat = _baseFrame!.descriptors;
+      final allKps = _baseFrame!.keypoints;
+      final indices = List<int>.generate(allKps.length, (i) => i)
+        ..sort((a, b) => allKps[b].response.compareTo(allKps[a].response));
+      final topN = indices.take(256).toList();
+      final descData = <List<int>>[];
+      for (final i in topN) {
+        final row = <int>[];
+        for (int j = 0; j < descMat.cols; j++) row.add(descMat.atU8(i, i1: j));
+        descData.add(row);
+      }
+      final kpData = topN
+          .map((i) => {
+                'x': allKps[i].x,
+                'y': allKps[i].y,
+                'response': allKps[i].response,
+              })
+          .toList();
 
-  double get _gaugeValue => _saving ? 1.0 : (_done ? 1.0 : 0.8 + _coverage * 0.2);
+      final api = context.read<ApiClient>();
+      final resp = await api.post('/pieces/draft', body: {
+        'texture_signature': {
+          'descriptors': descData,
+          'keypoints': kpData,
+          'keypoints_count': allKps.length,
+          'sharpness': _baseFrame!.sharpness,
+        },
+        'digit_guess': _digitValue,
+        'top_image': null,
+      });
+      _pieceId = resp['id'] as String;
+      _baseFrame?.dispose();
+      _baseFrame = null;
+    } catch (e) {
+      _creatingDraft = false;
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur draft: $e')));
+      }
+    }
+  }
+
+  Future<void> _finishScan() async {
+    if (_done) return;
+    setState(() {
+      _done = true;
+      _saving = true;
+    });
+    try {
+      final api = context.read<ApiClient>();
+      await api.patch('/pieces/$_pieceId', body: {
+        'color_signature': _tracker.toSignatureJson(),
+      });
+      if (mounted) {
+        final cam = _cameraController;
+        _cameraController = null;
+        await cam?.stopImageStream();
+        await cam?.dispose();
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => FinalizePieceScreen(
+              pieceId: _pieceId!,
+              digitGuess: _digitValue,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _done = false;
+        });
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur: $e')));
+      }
+    }
+  }
+
+  double _fillRatioDisplay = 0.0;
+
+  @override
+  void dispose() {
+    _cameraController?.stopImageStream();
+    _cameraController?.dispose();
+    _baseFrame?.dispose();
+    _baseExtractor.dispose();
+    super.dispose();
+  }
+
+  double get _gaugeValue => _saving
+      ? 1.0
+      : (_done ? 1.0 : 0.8 + _displayCoverage() * 0.2);
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Phase 3 — Rotation complète')),
+      appBar: AppBar(title: const Text('Scan complet de l\'objet')),
       body: _error != null
-          ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text(_error!, style: const TextStyle(color: Colors.red)),
-              const SizedBox(height: 16),
-              const CircularProgressIndicator(),
-              const Text('Accumulation des pixels en cours...', style: TextStyle(color: Colors.white54)),
-            ]))
-          : LayoutBuilder(builder: (_, constraints) => Stack(children: [
-              if (_isCameraReady && _cameraController != null)
-                GestureDetector(
-                  onTapUp: (d) => _onTapFocus(d, constraints),
-                  child: CameraPreview(_cameraController!),
-                ),
-              if (!_isCameraReady) const Center(child: CircularProgressIndicator()),
-              CustomPaint(
-                painter: _CenterCircleGuide(),
-                size: Size(constraints.maxWidth, constraints.maxHeight),
-              ),
-              Column(children: [
-                const Spacer(),
-                Container(
-                  margin: const EdgeInsets.all(24), padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(16)),
-                  child: Column(children: [
-                    if (_digitValue != null)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.blueAccent.withOpacity(0.25),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          'Chiffre détecté : $_digitValue',
-                          style: const TextStyle(
-                            color: Colors.lightBlueAccent, fontSize: 16, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: _gaugeValue, minHeight: 16, backgroundColor: Colors.white24,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          _done || _saving ? Colors.green : Colors.amber),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _saving ? 'Finalisation... 100%'
-                      : _done ? '100% — Rotation terminée !'
-                      : 'Rotation : ${(_coverage * 100).toStringAsFixed(0)}%',
-                      style: TextStyle(
-                        color: _done || _saving ? Colors.greenAccent : Colors.white70,
-                        fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 12),
-                    Icon(_saving ? Icons.hourglass_top : (_done ? Icons.check_circle : Icons.threesixty),
-                      color: _done || _saving ? Colors.green : Colors.amber, size: 48),
-                    const SizedBox(height: 8),
-                    Text(
-                      _saving ? 'Sauvegarde des motifs...'
-                      : _done ? 'Données couleur suffisantes !'
-                      : 'Tourne l\'objet sur lui-même\nface à la caméra (dans la zone centrale)',
-                      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                    if (_scanning) ...[
-                      const SizedBox(height: 6),
-                      Text('Couverture: ${(_coverage * 100).toStringAsFixed(0)}% | Frames: $_framesProcessed',
-                        style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                      Text('Netteté: ${_liveSharpness.toStringAsFixed(1)} | Calib: $_calibPct% | Floues: $_skippedBlurry',
-                        style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                    ],
-                    if (_done && !_saving) ...[
-                      const SizedBox(height: 12),
-                      Text('Finalisation...', style: TextStyle(color: Colors.greenAccent, fontSize: 14)),
-                    ],
-                  ]),
-                ),
-                const SizedBox(height: 32),
+          ? Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text(_error!, style: const TextStyle(color: Colors.red)),
+                const SizedBox(height: 16),
+                const CircularProgressIndicator(),
+                const Text('Accumulation des pixels en cours...',
+                    style: TextStyle(color: Colors.white54)),
               ]),
-            ])),
+            )
+          : LayoutBuilder(
+              builder: (_, constraints) {
+                if (_screenWidth != constraints.maxWidth ||
+                    _screenHeight != constraints.maxHeight) {
+                  _screenWidth = constraints.maxWidth;
+                  _screenHeight = constraints.maxHeight;
+                }
+                return Stack(children: [
+                  if (_isCameraReady && _cameraController != null)
+                    GestureDetector(
+                      onTapUp: (d) => _onTapFocus(d, constraints),
+                      child: CameraPreview(_cameraController!),
+                    ),
+                  if (!_isCameraReady) const Center(child: CircularProgressIndicator()),
+                  CustomPaint(
+                    painter: _CenterCircleGuide(),
+                    size: Size(constraints.maxWidth, constraints.maxHeight),
+                  ),
+                  Column(children: [
+                    const Spacer(),
+                    Container(
+                      margin: const EdgeInsets.all(24),
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Column(children: [
+                        if (_digitValue != null)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.blueAccent.withOpacity(0.25),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              'Chiffre détecté : $_digitValue',
+                              style: const TextStyle(
+                                color: Colors.lightBlueAccent,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: _gaugeValue,
+                            minHeight: 16,
+                            backgroundColor: Colors.white24,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              _done || _saving ? Colors.green : Colors.amber,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _saving
+                              ? 'Finalisation... 100%'
+                              : _done
+                                  ? '100% — Scan terminé !'
+                                  : 'Scan : ${(_displayCoverage() * 100).toStringAsFixed(0)}%',
+                          style: TextStyle(
+                            color: _done || _saving
+                                ? Colors.greenAccent
+                                : Colors.white70,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Icon(
+                          _saving
+                              ? Icons.hourglass_top
+                              : (_done
+                                  ? Icons.check_circle
+                                  : Icons.threesixty),
+                          color: _done || _saving ? Colors.green : Colors.amber,
+                          size: 48,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _saving
+                              ? 'Sauvegarde des motifs...'
+                              : _baseCaptured
+                                  ? 'Base capturée ✓ — tourne l\'objet pour la rotation'
+                                  : 'Cadre la base (fond poncé) dans la zone verte',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (_scanning) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            'Base: ${_baseCaptured ? "capturée" : "en attente"} | Remplissage: ${(_fillRatioDisplay * 100).toStringAsFixed(0)}%',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                            ),
+                          ),
+                          Text(
+                            'Couverture: ${(_displayCoverage() * 100).toStringAsFixed(0)}% | Frames: $_framesProcessed',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                            ),
+                          ),
+                          Text(
+                            'Netteté: ${_liveSharpness.toStringAsFixed(1)} | Calib: $_calibPct% | Floues: $_skippedBlurry',
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ]),
+                    ),
+                    const SizedBox(height: 32),
+                  ]),
+                ]);
+              },
+            ),
     );
   }
 }
@@ -245,7 +485,7 @@ class _CenterCircleGuide extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final double cx = size.width / 2;
     final double cy = size.height / 2;
-    const double radius = 200.0; // 400px diameter
+    const double radius = 200.0;
     final paint = Paint()
       ..color = Colors.white38
       ..style = PaintingStyle.stroke
@@ -258,9 +498,14 @@ class _CenterCircleGuide extends CustomPainter {
     for (final angle in [0.0, 90.0, 180.0, 270.0]) {
       final rad = angle * (3.14159 / 180.0);
       final dx = radius * math.cos(rad), dy = radius * math.sin(rad);
-      canvas.drawLine(Offset(cx + dx * 0.9, cy + dy * 0.9), Offset(cx + dx * 1.1, cy + dy * 1.1), tickPaint);
+      canvas.drawLine(
+        Offset(cx + dx * 0.9, cy + dy * 0.9),
+        Offset(cx + dx * 1.1, cy + dy * 1.1),
+        tickPaint,
+      );
     }
   }
+
   @override
   bool shouldRepaint(covariant _CenterCircleGuide oldDelegate) => false;
 }

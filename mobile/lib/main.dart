@@ -11,8 +11,7 @@ import 'screens/onboarding_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/piece_detail_screen.dart';
 import 'screens/make_offer_screen.dart';
-import 'screens/digit_scan_screen.dart';
-import 'screens/texture_scan_screen.dart';
+import 'screens/rotation_scan_screen.dart';
 import 'screens/trade_window_screen.dart';
 import 'services/debug_console.dart';
 
@@ -73,7 +72,7 @@ class ArtGensApp extends StatelessWidget {
         );
       case '/first-scan':
         return MaterialPageRoute(
-          builder: (_) => const DigitScanScreen(),
+          builder: (_) => const RotationScanScreen(),
         );
       case '/trade':
         return MaterialPageRoute(

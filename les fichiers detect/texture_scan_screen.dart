@@ -4,10 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../services/texture_extraction.dart';
 import '../services/api_client.dart';
+import '../services/series_config.dart';
 import '../providers/auth_provider.dart';
 import 'package:provider/provider.dart';
 import 'rotation_scan_screen.dart';
-import '../services/series_config.dart';
 
 /// Phase 2 — texture du fond poncé.
 /// Reçoit le chiffre déjà détecté en Phase 1 pour appliquer le bon preset
@@ -32,30 +32,79 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
   int _calibPct = 0;
   int _featureCount = 0;
   int _skippedBlurry = 0;
-  double _netteRatio = 0.0;
+  double _presenceRatio = 0.0;
   double _fillRatio = 0.0;
   late TextureExtractor _extractor;
   String? _error;
   int _sensorOrientation = 0;
   int _retryCount = 0;
-  bool _focusLocked = false;
   static const int _maxRetries = 3;
   Rect? _objectRect;
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   double _zoom = 1.0;
+  double _circleFraction = 0.6;
   double _screenWidth = 0.0;
   double _screenHeight = 0.0;
   // Région de scan en coordonnées image brute (calculée par frame)
   CameraCircleRegion? _currentScanRegion;
 
   // Convertit la région de scan (coordonnées image) en rectangle à l'écran pour affichage
-  // Comme la zone est maintenant un cercle FIXE 400px au centre, on retourne simplement ça
   Rect? _getScanZoneScreenRect(Size screenSize) {
-    final double cx = screenSize.width / 2;
-    final double cy = screenSize.height / 2;
-    const double radius = 200.0; // 400px diamètre
-    return Rect.fromCircle(center: Offset(cx, cy), radius: radius);
+    final region = _currentScanRegion;
+    if (region == null) return null;
+    final imgW = _lastImageW.toDouble();
+    final imgH = _lastImageH.toDouble();
+    if (imgW == 0 || imgH == 0) return null;
+
+    // Même logique inverse que computeCameraCircleRegion
+    double effectiveW, effectiveH;
+    int rotationSteps = (_sensorOrientation ~/ 90) % 4;
+    if (rotationSteps == 0 || rotationSteps == 2) {
+      effectiveW = imgW;
+      effectiveH = imgH;
+    } else {
+      effectiveW = imgH;
+      effectiveH = imgW;
+    }
+
+    final scaleX = screenSize.width / effectiveW;
+    final scaleY = screenSize.height / effectiveH;
+    final coverScale = scaleX > scaleY ? scaleX : scaleY;
+
+    final scaledW = effectiveW * coverScale;
+    final scaledH = effectiveH * coverScale;
+    final offsetX = (scaledW - screenSize.width) / 2;
+    final offsetY = (scaledH - screenSize.height) / 2;
+
+    // Centre et rayon dans l'image effective (avant rotation)
+    double effCx, effCy, effRadius;
+    if (rotationSteps == 0) {
+      effCx = region.cx;
+      effCy = region.cy;
+    } else if (rotationSteps == 1) { // 90° CW
+      effCx = region.cy;
+      effCy = effectiveH - region.cx;
+    } else if (rotationSteps == 2) { // 180°
+      effCx = effectiveW - region.cx;
+      effCy = effectiveH - region.cy;
+    } else { // 270°
+      effCx = effectiveW - region.cy;
+      effCy = region.cx;
+    }
+    effRadius = region.radius;
+
+    // Vers image scaled
+    final scaledCx = effCx * coverScale;
+    final scaledCy = effCy * coverScale;
+    final scaledRadius = effRadius * coverScale;
+
+    // Vers écran
+    final screenCx = scaledCx - offsetX;
+    final screenCy = scaledCy - offsetY;
+    final screenRadius = scaledRadius;
+
+    return Rect.fromCircle(center: Offset(screenCx, screenCy), radius: screenRadius);
   }
 
   List<Map<String, double>>? _displayKps;
@@ -101,16 +150,22 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
         _minZoom = await controller.getMinZoomLevel();
         _maxZoom = await controller.getMaxZoomLevel();
       } catch (_) {}
-      // Preset zoom par série (déterminé par le chiffre détecté en Phase 1).
+      // Preset zoom/cercle par série (déterminé par le chiffre détecté en Phase 1).
       final config = scanConfigForDigit(widget.digitGuess);
       _zoom = config.zoom.clamp(_minZoom, _maxZoom);
+      _circleFraction = config.circleFraction;
       try {
         await controller.setFocusMode(FocusMode.auto);
         await controller.setFocusPoint(const Offset(0.5, 0.5));
         await controller.setZoomLevel(_zoom);
       } catch (_) {}
-      // La mise au point se verrouille automatiquement quand 72% de la zone
-      // centrale est nette (voir _onImage / _lockFocus), sans délai fixe.
+      // Laisse l'autofocus se stabiliser au centre, puis verrouille — la mise
+      // au point ne bouge plus ensuite (approximation de "focus fixe" : l'API
+      // caméra ne permet pas de fixer une distance absolue, seulement
+      // verrouiller le résultat courant de l'autofocus).
+      Future.delayed(const Duration(milliseconds: 1500), () async {
+        try { await controller.setFocusMode(FocusMode.locked); } catch (_) {}
+      });
       if (mounted) {
         setState(() {
           _cameraController = controller;
@@ -132,7 +187,6 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     if (_cameraController == null || _capturing) return;
     setState(() {
       _capturing = true;
-      _focusLocked = false;
       _capturedFrame?.dispose();
       _capturedFrame = null;
       _skippedBlurry = 0;
@@ -149,17 +203,6 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     }
   }
 
-  Future<void> _lockFocus() async {
-    if (_focusLocked) return;
-    _focusLocked = true;
-    final controller = _cameraController;
-    if (controller == null) return;
-    try {
-      await controller.setFocusMode(FocusMode.locked);
-    } catch (_) {}
-    if (mounted) setState(() {});
-  }
-
   void _onImage(CameraImage image) {
     if (!_capturing) return;
     final rawQs = quickSharpness(image);
@@ -167,29 +210,26 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
     _lastImageW = image.width;
     _lastImageH = image.height;
 
-    // 1) Calculer la région circulaire FIXE : cercle 400px centre écran
-    final region = computeFixedCenterCircleRegion(
+    // 1) Calculer la région circulaire qui correspond au cercle guide affiché
+    final region = computeCameraCircleRegion(
       image: image,
       sensorOrientation: _sensorOrientation,
       screenWidth: _screenWidth,
       screenHeight: _screenHeight,
+      circleFraction: _circleFraction,
     );
 
-    // 2) Mettre à jour la région de scan IMMÉDIATEMENT (pour affichage zone verte)
-    _currentScanRegion = region;
-
-    // 3) Netteté dans cette même région circulaire (moyenne du gradient = mesure de
-    //    focus réelle, restreinte au socle). Normalisée 0..1 vs une netteté maximale
-    //    de référence (~6.0 : images nettes en lumière vive atteignent ~7+).
+    // 2) Ratio de netteté dans cette même région circulaire
     double ratio = 0.0;
     if (region != null) {
-      final meanGrad = sharpnessRatioInFixedCircle(
+      ratio = sharpnessRatioInScreenCircle(
         image,
         screenWidth: _screenWidth,
         screenHeight: _screenHeight,
         sensorOrientation: _sensorOrientation,
+        circleFraction: _circleFraction,
+        threshold: 3.0,
       );
-      ratio = (meanGrad / 6.0).clamp(0.0, 1.0);
     }
 
     if (mounted) {
@@ -197,23 +237,18 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
         _liveSharpness = rawQs;
         _maxSharpness = gate.maxSeen;
         _calibPct = gate.calibrationProgress;
-        _netteRatio = ratio;
+        _presenceRatio = ratio;
       });
     }
 
-    // Verrouillage de la mise au point dès que 35% de la zone centrale est nette
-    // (scan de la base : seuil de netteté volontairement bas pour le mapping du fond),
-    // à la place d'un délai fixe. Tant que ce n'est pas atteint, on n'amorce pas le scan.
-    if (!_focusLocked) {
-      if (ratio >= 0.35) {
-        _lockFocus();
-      } else {
-        _stableSinceMs = null;
-        _stableDurationMs = 0;
-        return;
-      }
+    if (ratio < 0.72) {
+      _stableSinceMs = null;
+      _stableDurationMs = 0;
+      return;
     }
 
+    // 3) Extraire les features UNIQUEMENT dans la région circulaire
+    _currentScanRegion = region;
     final frame = _extractor.extract(image, region: region, logErrors: true);
     if (frame == null) {
       if (mounted) {
@@ -235,12 +270,11 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
       if (kp.y < minY) minY = kp.y; if (kp.y > maxY) maxY = kp.y;
     }
     final kpArea = (maxX - minX) * (maxY - minY);
-    final circleArea = region != null ? (math.pi * region.radius * region.radius) : 0.0;
+    final circleArea = math.pi * region.radius * region.radius;
     final fillRatio = circleArea > 0 ? (kpArea / circleArea).clamp(0.0, 1.0) : 0.0;
 
-    // Exiger que l'objet remplisse au moins 70% du cercle de scan avant de stabiliser
-    // (objectif à terme 90-100%, seuil souple pour l'instant)
-    const minFillRatio = 0.70;
+    // Exiger que l'objet remplisse au moins 35% du cercle de scan avant de stabiliser
+    const minFillRatio = 0.35;
     if (fillRatio < minFillRatio) {
       if (mounted) {
         setState(() {
@@ -493,8 +527,8 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
                         Text(
                           _saving ? 'Sauvegarde de la cartographie...'
                           : _capturing
-                              ? (!_focusLocked
-                                  ? 'Netteté: ${(_netteRatio * 100).toStringAsFixed(0)}% — ajuste jusqu\'à 72%'
+                              ? (_presenceRatio < 0.72
+                                  ? 'Place l\'objet dans la zone\n(net: ${(_presenceRatio * 100).toStringAsFixed(0)}%)'
                                   : (_fillRatio < 0.35
                                       ? 'Remplis la zone verte avec l\'objet\n(remplissage: ${(_fillRatio * 100).toStringAsFixed(0)}%)'
                                       : 'Scanne le fond poncé\nMaintiens l\'objet immobile'))
