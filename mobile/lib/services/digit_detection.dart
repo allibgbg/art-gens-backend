@@ -42,11 +42,26 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
     final (contours, _) = cv.findContours(cleaned, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     double maxArea = 0;
     cv.VecPoint? best;
+    double totalArea = 0;
+    int bigCount = 0;
     for (final c in contours) {
       final a = cv.contourArea(c);
+      totalArea += a;
       if (a > maxArea) { maxArea = a; best = c; }
+      if (a > imgArea * 0.005) bigCount++;
     }
     if (best == null || best.length < 10) {
+      cleaned.dispose(); contours.dispose();
+      return const DigitDetectionResult(null, 0, null);
+    }
+    // Un chiffre gravé sur un objet propre DOMINE la scène (peu d'autres
+    // contours). Un fond chargé (décor, objets) a beaucoup de contours -> on
+    // rejette pour éviter les faux positifs sur l'environnement.
+    if (totalArea > 0 && maxArea / totalArea < 0.4) {
+      cleaned.dispose(); contours.dispose();
+      return const DigitDetectionResult(null, 0, null);
+    }
+    if (bigCount > 12) {
       cleaned.dispose(); contours.dispose();
       return const DigitDetectionResult(null, 0, null);
     }
@@ -137,7 +152,7 @@ DigitDetectionResult detectDigit(cv.Mat gray, {bool enforceCentering = false}) {
     final conf = (1.0 - bestDist / 10.0).clamp(0.0, 1.0);
 
     // Rejeter si pas assez confiant (évite les faux positifs sur le fond).
-    if (conf < 0.6) return const DigitDetectionResult(null, 0, null);
+    if (conf < 0.65) return const DigitDetectionResult(null, 0, null);
 
     return DigitDetectionResult(guess, conf, rect);
   } catch (_) {

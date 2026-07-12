@@ -31,7 +31,8 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   bool _saving = false;
   bool _creatingDraft = false;
   String? _error;
-  String? _digitValue;
+  String? _digitValue; // chiffre CONFIRMÉ (arme la base + rotation)
+  String? _pendingDigit; // chiffre détecté stable, en attente de confirmation
   String? _pieceId;
 
   // Stabilité du chiffre : on n'accepte un chiffre détecté qu'après N
@@ -171,8 +172,10 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
       counts.forEach((k, c) {
         if (c >= _digitMinCount) stable ??= k;
       });
-      if (stable != null && stable != _digitValue) {
-        _digitValue = stable;
+      // On propose le chiffre à l'utilisateur ; seul un chiffre CONFIRMÉ
+      // (via le bouton) arme la base/rotation. Évite tout faux positif de fond.
+      if (stable != null && stable != _pendingDigit && stable != _digitValue) {
+        _pendingDigit = stable;
         if (mounted) setState(() {});
       }
     }
@@ -349,6 +352,15 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
 
   double _fillRatioDisplay = 0.0;
 
+  void _confirmDigit() {
+    if (_pendingDigit != null) {
+      setState(() {
+        _digitValue = _pendingDigit;
+        _pendingDigit = null;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _cameraController?.stopImageStream();
@@ -403,25 +415,53 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                         color: Colors.black54,
                         borderRadius: BorderRadius.circular(16),
                       ),
-                      child: Column(children: [
+                        child: Column(children: [
                         if (_digitValue != null)
                           Container(
                             margin: const EdgeInsets.only(bottom: 8),
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 12, vertical: 4),
                             decoration: BoxDecoration(
-                              color: Colors.blueAccent.withOpacity(0.25),
+                              color: Colors.green.withOpacity(0.25),
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
-                              'Chiffre détecté : $_digitValue',
+                              'Chiffre confirmé : $_digitValue ✓',
                               style: const TextStyle(
-                                color: Colors.lightBlueAccent,
+                                color: Colors.greenAccent,
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                          ),
+                          )
+                        else if (_pendingDigit != null)
+                          Column(children: [
+                            Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.withOpacity(0.25),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                'Chiffre détecté : $_pendingDigit ?',
+                                style: const TextStyle(
+                                  color: Colors.amber,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            ElevatedButton(
+                              onPressed: _confirmDigit,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.green,
+                                foregroundColor: Colors.white,
+                              ),
+                              child: const Text('Confirmer le chiffre'),
+                            ),
+                          ]),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
@@ -464,9 +504,11 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                                 ? 'Sauvegarde des motifs...'
                                 : _baseCaptured
                                     ? 'Base capturée ✓ — tourne l\'objet pour la rotation'
-                                    : _digitValue == null
-                                        ? 'Cadre l\'objet : détecte le chiffre gravé (2/5)'
-                                        : 'Montre la base (fond poncé) dans la zone verte',
+                                    : _digitValue != null
+                                        ? 'Montre la base (fond poncé) dans la zone verte'
+                                        : _pendingDigit != null
+                                            ? 'Confirme le chiffre détecté'
+                                            : 'Cadre l\'objet : détecte le chiffre gravé (2/5)',
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 18,
