@@ -42,18 +42,28 @@ class AdaptiveSharpnessGate {
   final int calibrationDurationMs;
   final double ratio;
   final double absoluteMin;
+  final double decay;
 
   AdaptiveSharpnessGate({
     this.calibrationDurationMs = 20000,
     this.ratio = 0.7,
     this.absoluteMin = 1.8,
+    this.decay = 0.99,
   });
 
   bool isSharp(double qs) {
     final now = DateTime.now().millisecondsSinceEpoch;
     _startMs ??= now;
 
-    if (qs > _maxSeen) _maxSeen = qs;
+    if (qs > _maxSeen) {
+      _maxSeen = qs;
+    } else {
+      // Décroissance lente du max mémorisé : sans cela, le seuil relatif
+      // (_maxSeen * ratio) reste bloqué sur la frame la plus nette vue au
+      // début du scan, et finit par rejeter toutes les frames suivantes
+      // (objet qui tourne, éclairage changeant) -> scan bloqué.
+      _maxSeen *= decay;
+    }
 
     final elapsed = now - _startMs!;
     if (elapsed < calibrationDurationMs) return qs >= absoluteMin;

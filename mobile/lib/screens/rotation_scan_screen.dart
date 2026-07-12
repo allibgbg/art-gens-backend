@@ -50,6 +50,9 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
       final controller = CameraController(cam, ResolutionPreset.medium);
       await controller.initialize();
       try {
+        final minZ = await controller.getMinZoomLevel();
+        final maxZ = await controller.getMaxZoomLevel();
+        await controller.setZoomLevel(1.4.clamp(minZ, maxZ));
         await controller.setFocusMode(FocusMode.auto);
         await controller.setFocusPoint(const Offset(0.5, 0.5));
       } catch (_) {}
@@ -80,10 +83,9 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
 
   Future<void> _startScan() async {
     if (_cameraController == null || _scanning) return;
-    _scanner?.cancel();
-    setState(() { _scanning = true; _done = false; _scanner = null; _error = null; });
-    final scanner = MultiAngleScanner(_cameraController!);
-    _scanner = scanner;
+    setState(() { _scanning = true; _done = false; _error = null; });
+    // Un seul scanner pour toute la durée du scan éternel.
+    final scanner = _scanner ??= MultiAngleScanner(_cameraController!);
 
     scanner.onProgress = (cov, conf) {
       if (mounted) setState(() { _coverage = cov; _confidence = conf; });
@@ -95,29 +97,16 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
       });
     };
 
-    try {
-      _result = await scanner.start();
-    } catch (_) { _result = null; }
+    // Scan « éternel » : le flux tourne jusqu'à ce que la couverture suffisante
+    // soit atteinte (le scanner ne s'arrête que sur isComplete). On n'interrompt
+    // ni ne recommence — l'utilisateur continue simplement à tourner l'objet.
+    _result = await scanner.start();
 
     if (!mounted) return;
 
-    final cov = _result?.coverage ?? 0;
-    if (cov < 0.6) {
-      setState(() {
-        _scanning = false;
-        _error = 'Couverture insuffisante (${(cov * 100).toStringAsFixed(0)}%) — continue à tourner l\'objet';
-      });
-      Future.delayed(const Duration(seconds: 1), () {
-        if (mounted) { setState(() => _error = null); _startScan(); }
-      });
-      return;
-    }
-
-    if (mounted) {
-      setState(() { _scanning = false; _done = true; });
-      await Future.delayed(const Duration(seconds: 2));
-      _saveAndNext();
-    }
+    setState(() { _scanning = false; _done = true; });
+    await Future.delayed(const Duration(seconds: 2));
+    _saveAndNext();
   }
 
   Future<void> _saveAndNext() async {
@@ -161,7 +150,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
               Text(_error!, style: const TextStyle(color: Colors.red)),
               const SizedBox(height: 16),
               const CircularProgressIndicator(),
-              const Text('Nouvelle tentative...', style: TextStyle(color: Colors.white54)),
+              const Text('Accumulation des pixels en cours...', style: TextStyle(color: Colors.white54)),
             ]))
           : LayoutBuilder(builder: (_, constraints) => Stack(children: [
               if (_isCameraReady && _cameraController != null)

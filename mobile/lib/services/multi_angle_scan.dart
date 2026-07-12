@@ -25,15 +25,12 @@ class MultiAngleScanner {
   final CoverageTracker _tracker;
   final AdaptiveSharpnessGate _sharpnessGate = AdaptiveSharpnessGate();
   Completer<ScanResult>? _completer;
-  Timer? _timeoutTimer;
-  final int _maxFrames;
 
   ScanProgressCallback? onProgress;
   ScanSharpnessCallback? onSharpness;
 
-  MultiAngleScanner(this._camera, {int gridRows = 4, int gridCols = 4, int maxFrames = 200})
-      : _tracker = CoverageTracker(gridRows, gridCols),
-        _maxFrames = maxFrames;
+  MultiAngleScanner(this._camera, {int gridRows = 4, int gridCols = 4})
+      : _tracker = CoverageTracker(gridRows, gridCols);
 
   bool get running => _running;
   double get coverage => _tracker.coverage;
@@ -42,12 +39,14 @@ class MultiAngleScanner {
   int get skippedBlurry => _skippedBlurry;
   bool get isComplete => _tracker.isStable && _tracker.confidence >= 0.6 && _tracker.coverage >= 0.8;
 
+  /// Scan « éternel » : le flux ne s'arrête que lorsque la couverture
+  /// suffisante (isComplete) est atteinte. Aucun timeout ni cap de frames.
   Future<ScanResult> start() async {
-    _running = true;
     _tracker.reset();
     _sharpnessGate.reset();
     _frameCount = 0;
     _skippedBlurry = 0;
+    _running = true;
     _completer = Completer<ScanResult>();
 
     try {
@@ -56,10 +55,6 @@ class MultiAngleScanner {
       _finish();
       throw Exception('Erreur démarrage flux caméra: $e');
     }
-
-    _timeoutTimer = Timer(Duration(seconds: 60), () {
-      if (_running) _finish();
-    });
 
     return _completer!.future;
   }
@@ -76,7 +71,6 @@ class MultiAngleScanner {
     }
 
     _frameCount++;
-    if (_frameCount >= _maxFrames) { _finish(); return; }
     final sig = SpatialSignature.extract(image);
     final cov = _tracker.addFrame(sig);
     onSharpness?.call(qs, _sharpnessGate.maxSeen,
@@ -91,7 +85,6 @@ class MultiAngleScanner {
   void _finish() {
     if (!_running) return;
     _running = false;
-    _timeoutTimer?.cancel();
     try { _camera.stopImageStream(); } catch (_) {}
     if (_completer != null && !_completer!.isCompleted) {
       _completer!.complete(_buildResult());

@@ -199,10 +199,11 @@ class _TextureScanScreenState extends State<TextureScanScreen> {
       });
     }
 
-    // Verrouillage de la mise au point dès que 72% de la zone centrale est nette,
+    // Verrouillage de la mise au point dès que 35% de la zone centrale est nette
+    // (scan de la base : seuil de netteté volontairement bas pour le mapping du fond),
     // à la place d'un délai fixe. Tant que ce n'est pas atteint, on n'amorce pas le scan.
     if (!_focusLocked) {
-      if (ratio >= 0.72) {
+      if (ratio >= 0.35) {
         _lockFocus();
       } else {
         _stableSinceMs = null;
