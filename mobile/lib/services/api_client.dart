@@ -109,6 +109,21 @@ class ApiClient {
     return jsonDecode(res['body'] as String) as Map<String, dynamic>;
   }
 
+  /// Identifie un œuf à partir d'un scan et renvoie sa fiche (pas de verdict).
+  Future<Map<String, dynamic>> identifyEgg({
+    required String value,
+    required List<double> hu,
+    required Map<String, dynamic> textureSignature,
+    required Map<String, dynamic> colorSignature,
+  }) async {
+    return post('/pieces/identify', body: {
+      'value': value,
+      'hu': hu,
+      'texture_signature': textureSignature,
+      'color_signature': colorSignature,
+    });
+  }
+
   Future<Map<String, dynamic>> _sendMultipart(http.MultipartRequest req) async {
     while (true) {
       try {

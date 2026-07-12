@@ -8,7 +8,8 @@ from ..models.piece import Piece, PieceStatus, ColorEnum
 from ..models.user import User
 from ..services.auth_service import get_current_user, get_current_artist
 from ..services.piece_service import PieceService
-from ..services.matching_service import MatchingOrchestrator
+from ..services.matching_service import MatchingOrchestrator, TextureMatchingService, ColorMatchingService
+from ..services import digit_auth as digit_auth_service
 from pydantic import BaseModel
 
 
@@ -32,6 +33,15 @@ class PieceFinalize(BaseModel):
     color_secondary: Optional[str] = None
     material_notes: Optional[str] = None
     artist_note: Optional[str] = None
+
+
+class PieceIdentify(BaseModel):
+    """Scan d'identification : l'app envoie l'empreinte extraite on-device.
+    Le backend renvoie la *fiche* de l'œuf reconnu (pas un verdict passe/échec)."""
+    value: Optional[str] = None
+    hu: Optional[List[float]] = None
+    texture_signature: Optional[Any] = None
+    color_signature: Optional[Any] = None
 
 
 router = APIRouter(prefix="/pieces", tags=["pieces"])
@@ -80,6 +90,83 @@ def draft_piece(data: PieceDraft, db: Session = Depends(get_db), current_user: U
     db.commit()
     db.refresh(piece)
     return {"id": piece.id, "status": "draft"}
+
+
+@router.post("/identify")
+def identify_piece(
+    data: PieceIdentify,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Identifie un œuf à partir d'un scan et renvoie sa fiche.
+    Aucun verdict passe/échec : on présente la pièce reconnue (ou
+    'non répertorié') comme le ferait un utilisateur lambda à qui on
+    aurait confié l'œuf."""
+    value = data.value
+    hu = data.hu or []
+
+    # 1) Conformité du moule (chiffre gravé) vs référence officielle.
+    mold = digit_auth_service.verify(value, hu)
+    if mold.get("reason") == "reference_non_definie":
+        mold_official = None
+        digit_similarity = None
+    else:
+        mold_official = bool(mold.get("authentic"))
+        dist = mold.get("distance")
+        digit_similarity = (1.0 - min(1.0, (dist or 0.0) / 2.0)) if dist is not None else 0.5
+
+    # 2) Recherche de la meilleure pièce (même série) par texture + couleur.
+    query = db.query(Piece)
+    if value and str(value).isdigit():
+        query = query.filter(Piece.series_value == int(value))
+    candidates = query.all()
+
+    best = None
+    best_tex = 0.0
+    best_col = 0.0
+    best_score = -1.0
+    for p in candidates:
+        if not p.texture_signature or not p.color_signature:
+            continue
+        tex, _, _, _ = TextureMatchingService.match(data.texture_signature, p.texture_signature)
+        col = ColorMatchingService.compare_signatures(data.color_signature, p.color_signature)
+        dscore = digit_similarity if digit_similarity is not None else 0.5
+        combined = 0.55 * tex + 0.30 * col + 0.15 * dscore
+        if combined > best_score:
+            best_score = combined
+            best = p
+            best_tex = tex
+            best_col = col
+
+    identified = best is not None and best_score >= 0.65
+
+    if not identified or best is None:
+        return {
+            "identified": False,
+            "mold_official": mold_official,
+            "similarity": None,
+            "piece": None,
+        }
+
+    creation = best.creation_date.isoformat() if best.creation_date else None
+    return {
+        "identified": True,
+        "mold_official": mold_official,
+        "similarity": round(best_score, 3),
+        "texture_similarity": round(best_tex, 3),
+        "color_similarity": round(best_col, 3),
+        "digit_similarity": round(digit_similarity, 3) if digit_similarity is not None else None,
+        "piece": {
+            "id": best.id,
+            "display_number": best.display_number,
+            "series_value": best.series_value,
+            "reference_pinceaux_value": best.reference_pinceaux_value,
+            "color_primary": best.color_primary.value if hasattr(best.color_primary, "value") else str(best.color_primary),
+            "creation_date": creation,
+            "artist_note": best.artist_note,
+            "status": best.status.value if hasattr(best.status, "value") else str(best.status),
+        },
+    }
 
 
 # Routes paramétrées

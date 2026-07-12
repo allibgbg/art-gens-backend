@@ -4,6 +4,7 @@ import '../providers/auth_provider.dart';
 import '../providers/pieces_provider.dart';
 import '../models/piece.dart';
 import 'object_3d_capture_screen.dart';
+import 'egg_verify_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -76,9 +77,25 @@ class _CollectionTabState extends State<_CollectionTab> {
                   title: const Text('Outil scan 3D (photos live)'),
                   subtitle: const Text('Capture l\'objet sous plusieurs angles'),
                   trailing: const Icon(Icons.arrow_forward_ios),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const Object3DCaptureScreen()),
+                ),
+              ),
+            ),
+          ),
+          Padding(
+              padding: const EdgeInsets.all(12),
+              child: Card(
+                color: Colors.green.shade100,
+                child: ListTile(
+                  leading: const Icon(Icons.badge, size: 32),
+                  title: const Text('Vérifier un œuf'),
+                  subtitle: const Text('Scanne et affiche la fiche de l\'œuf'),
+                  trailing: const Icon(Icons.arrow_forward_ios),
                   onTap: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => const Object3DCaptureScreen()),
+                    MaterialPageRoute(builder: (_) => const EggVerifyScreen()),
                   ),
                 ),
               ),
