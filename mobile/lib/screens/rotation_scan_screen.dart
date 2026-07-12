@@ -33,6 +33,7 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
   String? _error;
   String? _digitValue; // chiffre CONFIRMÉ (arme la base + rotation)
   String? _pendingDigit; // chiffre détecté stable, en attente de confirmation
+  bool _confirming = false; // appel serveur de vérification en cours
   List<double>? _lastDetHu; // signature Hu du dernier chiffre détecté
   String? _pieceId;
 
@@ -355,15 +356,49 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
 
   double _fillRatioDisplay = 0.0;
 
-  void _confirmDigit() {
-    if (_pendingDigit != null) {
-      // Enregistre la signature EXACTE du chiffre moulé comme template
-      // d'authentification : seul CE "5" (même moule) sera reconnu ensuite.
-      if (_lastDetHu != null) setDigitReference(_pendingDigit!, _lastDetHu!);
-      setState(() {
-        _digitValue = _pendingDigit;
-        _pendingDigit = null;
+  Future<void> _confirmDigit() async {
+    if (_pendingDigit == null || _lastDetHu == null || _confirming) return;
+    setState(() => _confirming = true);
+    try {
+      final api = context.read<ApiClient>();
+      // Vérification CÔTÉ SERVEUR : le chiffre doit correspondre au moule
+      // officiel (auth). Le client n'est pas de confiance.
+      final resp = await api.post('/digits/verify', body: {
+        'value': _pendingDigit,
+        'hu': _lastDetHu,
       });
+      if (resp['authentic'] != true) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+              'Chiffre NON authentique : ce n\'est pas un moule officiel '
+              '(distance ${resp['distance']})',
+            ),
+          ));
+          setState(() {
+            _pendingDigit = null;
+            _confirming = false;
+          });
+        }
+        return;
+      }
+      // Enregistre la signature EXACTE du chiffre moulé comme template local
+      // (repère de rotation) : seul CE "5" (même moule) sera reconnu ensuite.
+      if (_lastDetHu != null) setDigitReference(_pendingDigit!, _lastDetHu!);
+      if (mounted) {
+        setState(() {
+          _digitValue = _pendingDigit;
+          _pendingDigit = null;
+          _confirming = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur de vérification : $e')),
+        );
+        setState(() => _confirming = false);
+      }
     }
   }
 
@@ -460,12 +495,21 @@ class _RotationScanScreenState extends State<RotationScanScreen> {
                               ),
                             ),
                             ElevatedButton(
-                              onPressed: _confirmDigit,
+                              onPressed: _confirming ? null : _confirmDigit,
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: Colors.green,
                                 foregroundColor: Colors.white,
                               ),
-                              child: const Text('Confirmer le chiffre'),
+                              child: _confirming
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : const Text('Confirmer le chiffre'),
                             ),
                           ]),
                         ClipRRect(
