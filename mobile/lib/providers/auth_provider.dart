@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../config.dart';
 import '../models/user.dart';
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
@@ -19,6 +20,7 @@ class AuthProvider extends ChangeNotifier {
   bool get isLoggedIn => _isLoggedIn;
   String? get error => _error;
   bool get needsOnboarding => _isLoggedIn && (_user?.onboardingCompleted == false);
+  bool get isAdmin => kAdminBuild && _user?.email == 'robert.marmouth@gmail.com';
 
   Future<void> tryRestoreSession() async {
     await _authService.restoreSession();

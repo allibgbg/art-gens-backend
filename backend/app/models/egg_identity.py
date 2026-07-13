@@ -10,6 +10,7 @@ class EggIdentity(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     display_number = Column(String(32), nullable=False)
     series_value = Column(Integer, nullable=False)
+    reference_pinceaux_value = Column(Integer, nullable=False, default=0)
     digit_number = Column(String(16), nullable=True)
     notes = Column(Text, nullable=True)
     face_photo = Column(Text, nullable=True)  # base64 JPEG

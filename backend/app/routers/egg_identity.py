@@ -11,6 +11,7 @@ from ..services.auth_service import get_current_artist
 class EggIdentityCreate(BaseModel):
     display_number: str
     series_value: int
+    reference_pinceaux_value: Optional[int] = 0
     digit_number: Optional[str] = None
     notes: Optional[str] = None
     face_photo: Optional[str] = None  # base64 JPEG
@@ -20,6 +21,7 @@ class EggIdentityCreate(BaseModel):
 class EggIdentityUpdate(BaseModel):
     display_number: Optional[str] = None
     series_value: Optional[int] = None
+    reference_pinceaux_value: Optional[int] = None
     digit_number: Optional[str] = None
     notes: Optional[str] = None
 
@@ -36,6 +38,7 @@ def create_egg_identity(
         id=str(_uuid.uuid4()),
         display_number=data.display_number,
         series_value=data.series_value,
+        reference_pinceaux_value=data.reference_pinceaux_value or 0,
         digit_number=data.digit_number,
         notes=data.notes,
         face_photo=data.face_photo,
@@ -61,6 +64,7 @@ def list_egg_identities(
             "id": e.id,
             "display_number": e.display_number,
             "series_value": e.series_value,
+            "reference_pinceaux_value": e.reference_pinceaux_value or 0,
             "digit_number": e.digit_number,
             "notes": e.notes,
             "has_face_photo": e.face_photo is not None,
@@ -81,6 +85,7 @@ def get_egg_identity(egg_id: str, db: Session = Depends(get_db)):
         "id": egg.id,
         "display_number": egg.display_number,
         "series_value": egg.series_value,
+        "reference_pinceaux_value": egg.reference_pinceaux_value or 0,
         "digit_number": egg.digit_number,
         "notes": egg.notes,
         "face_photo": egg.face_photo,

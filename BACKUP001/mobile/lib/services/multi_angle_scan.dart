@@ -1,0 +1,130 @@
+import 'dart:async';
+import 'package:camera/camera.dart';
+import 'color_extraction.dart';
+import 'texture_extraction.dart';
+import 'digit_detection.dart';
+
+typedef ScanProgressCallback = void Function(double coverage, double confidence);
+
+typedef ScanSharpnessCallback = void Function(
+    double qs, double max, int calibPct, int skipped, int total);
+
+typedef ScanDigitCallback = void Function(String? value, double digitCoverage);
+
+class ScanResult {
+  final Map<String, dynamic> spatialSignature;
+  final double coverage;
+  final double confidence;
+  final int framesProcessed;
+  final String? digitValue;
+
+  ScanResult(this.spatialSignature, this.coverage, this.confidence, this.framesProcessed,
+      this.digitValue);
+}
+
+class MultiAngleScanner {
+  final CameraController _camera;
+  final String? expectedDigit;
+  bool _running = false;
+  int _frameCount = 0;
+  int _skippedBlurry = 0;
+  final CoverageTracker _tracker;
+  final AdaptiveSharpnessGate _sharpnessGate = AdaptiveSharpnessGate();
+  Completer<ScanResult>? _completer;
+
+  ScanProgressCallback? onProgress;
+  ScanSharpnessCallback? onSharpness;
+  ScanDigitCallback? onDigit;
+
+  MultiAngleScanner(this._camera, {int gridRows = 4, int gridCols = 4, this.expectedDigit})
+      : _tracker = CoverageTracker(gridRows, gridCols);
+
+  bool get running => _running;
+  double get coverage => _tracker.coverage;
+  double get confidence => _tracker.confidence;
+  int get framesProcessed => _frameCount;
+  int get skippedBlurry => _skippedBlurry;
+  // Completion quand la surface explorée est suffisante (couverture >= 0.8)
+  // ET l'utilisateur a cessé de tourner l'objet (isStable), OU au crédit max
+  // (rotation très complète), OU en filet de sécurité après beaucoup de frames
+  // nettes sans progression (évite un scan éternel si la détection échoue).
+  bool get isComplete =>
+      (_tracker.coverage >= 0.8 && _tracker.isStable) ||
+      _tracker.coverage >= 1.0 ||
+      (_frameCount >= 1200 && _tracker.isStable);
+
+  /// Scan « éternel » : le flux ne s'arrête que lorsque la couverture
+  /// suffisante (isComplete) est atteinte. Aucun timeout ni cap de frames.
+  Future<ScanResult> start() async {
+    _tracker.reset();
+    _sharpnessGate.reset();
+    _frameCount = 0;
+    _skippedBlurry = 0;
+    _running = true;
+    _completer = Completer<ScanResult>();
+
+    try {
+      await _camera.startImageStream(_onImage);
+    } catch (e) {
+      _finish();
+      throw Exception('Erreur démarrage flux caméra: $e');
+    }
+
+    return _completer!.future;
+  }
+
+  void _onImage(CameraImage image) {
+    if (!_running) return;
+
+    final qs = quickSharpness(image);
+    if (!_sharpnessGate.isSharp(qs)) {
+      _skippedBlurry++;
+      onSharpness?.call(qs, _sharpnessGate.maxSeen,
+          _sharpnessGate.calibrationProgress, _skippedBlurry, _frameCount);
+      return;
+    }
+
+    _frameCount++;
+    final sig = SpatialSignature.extract(image);
+    final cov = _tracker.addFrame(sig);
+
+    // Détection du chiffre gravé sur CHAQUE frame validée : sert de repère de
+    // rotation (le chiffre se déplace latéralement quand l'œuf pivote).
+    final det = detectDigitFromImage(image, enforceCentering: false);
+    _tracker.addDigit(det, expectedDigit, image.width);
+    if (det.value != null) {
+      onDigit?.call(det.value, _tracker.digitCoverage);
+    }
+
+    onSharpness?.call(qs, _sharpnessGate.maxSeen,
+        _sharpnessGate.calibrationProgress, _skippedBlurry, _frameCount);
+    onProgress?.call(cov, _tracker.confidence);
+
+    if (isComplete) {
+      _finish();
+    }
+  }
+
+  void _finish() {
+    if (!_running) return;
+    _running = false;
+    try { _camera.stopImageStream(); } catch (_) {}
+    if (_completer != null && !_completer!.isCompleted) {
+      _completer!.complete(_buildResult());
+    }
+  }
+
+  ScanResult _buildResult() {
+    return ScanResult(
+      _tracker.toSignatureJson(),
+      _tracker.coverage,
+      _tracker.confidence,
+      _frameCount,
+      _tracker.digitValue,
+    );
+  }
+
+  void cancel() {
+    _finish();
+  }
+}

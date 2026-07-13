@@ -1,19 +1,17 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:camera/camera.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
+import 'package:provider/provider.dart';
+import '../services/egg_base_identity.dart';
+import '../services/api_client.dart';
 import '../services/texture_extraction.dart';
-import '../services/color_extraction.dart';
-import '../services/digit_detection.dart';
-import '../services/egg_vault.dart';
-import '../services/egg_auth.dart';
-import 'egg_fiche_screen.dart';
+import '../services/debug_console.dart';
 
-/// Écran « Vérifier un œuf » : scan on-device (chiffre + base + couleur) puis
-/// interrogation du backend qui renvoie la FICHE de l'œuf reconnu (pas de
-/// verdict passe/échec).
+/// Écran de vérification : preview caméra en continu, mais le SIFT
+/// est extrait sur des photos plein résolution (takePicture) pour
+/// matcher à la même échelle que l'enrollment.
 class EggVerifyScreen extends StatefulWidget {
   const EggVerifyScreen({super.key});
 
@@ -22,46 +20,126 @@ class EggVerifyScreen extends StatefulWidget {
 }
 
 class _EggVerifyScreenState extends State<EggVerifyScreen> {
-  CameraController? _cameraController;
-  int _sensorOrientation = 0;
-  bool _isCameraReady = false;
-  bool _scanning = false;
-  bool _done = false;
-  bool _saving = false;
+  CameraController? _controller;
+  bool _ready = false;
   String? _error;
-  String? _digitValue;
-  String? _pendingDigit;
-  bool _confirming = false;
-  List<double>? _lastDetHu;
-  int _digitBufLen = 8;
-  final List<String?> _digitBuf = [];
 
-  double _screenWidth = 0.0;
-  double _screenHeight = 0.0;
-  int _framesProcessed = 0;
-  double _liveSharpness = 0;
-  int _calibPct = 0;
-  int _skippedBlurry = 0;
+  bool _done = false;
+  bool _noIdentity = false;
+  bool _capturing = false;
 
-  final TextureExtractor _baseExtractor = TextureExtractor(nFeatures: 500);
-  bool _baseCaptured = false;
-  TextureFrame? _baseFrame;
-  int? _baseStableSince;
-  int _baseCheckCounter = 0;
-  double _lastFillRatio = 0.0;
+  double _currentScore = 0;
+  int _currentMatchCount = 0;
+  double _peakScore = 0;
+  int _stableCount = 0;
+  static const int _stableThreshold = 3;
+  static const double _authThreshold = 0.25;
 
-  CoverageTracker _tracker = CoverageTracker(4, 4);
-  final AdaptiveSharpnessGate _sharpnessGate = AdaptiveSharpnessGate();
+  final List<double> _scoreHistory = [];
+  static const int _historySize = 5;
 
-  // Signature de base sérialisée pour l'identification.
-  Map<String, dynamic>? _candidateBase;
-  bool _identifying = false;
-  Map<String, dynamic>? _enrollData;
+  int _snapshotsTaken = 0;
+  int _liveFeatureCount = 0;
+
+  List<_EggCandidate> _candidates = [];
+  _EggCandidate? _bestCandidate;
+  Timer? _snapshotTimer;
+
+  bool _seriesSelected = false;
+  int? _selectedSeries;
 
   @override
-  void initState() {
-    super.initState();
-    _initCamera();
+  Widget build(BuildContext context) {
+    if (!_seriesSelected) return _buildSeriesPicker();
+    return _buildScanScreen();
+  }
+
+  Widget _buildSeriesPicker() {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Vérifier un œuf')),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.search, size: 64, color: Colors.green),
+            const SizedBox(height: 24),
+            const Text('Quelle série ?', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            const Text('Choisissez le numéro de série de l\'œuf à vérifier'),
+            const SizedBox(height: 32),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [2, 5, 10, 20].map((s) => Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size(72, 72),
+                    textStyle: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: () => _onSeriesChosen(s),
+                  child: Text('$s'),
+                ),
+              )).toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _onSeriesChosen(int series) async {
+    setState(() {
+      _selectedSeries = series;
+      _seriesSelected = true;
+    });
+    await _loadIdentities(series);
+  }
+
+  Widget _buildScanScreen() {
+    if (_noIdentity) {
+      return Scaffold(
+        appBar: AppBar(title: Text('Série ${_selectedSeries}')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.info_outline, size: 48, color: Colors.orange),
+                const SizedBox(height: 16),
+                SelectableText(_error!, textAlign: TextAlign.center),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return Scaffold(
+        appBar: AppBar(title: Text('Série ${_selectedSeries}')),
+        body: Center(child: SelectableText(_error!, style: const TextStyle(color: Colors.red))),
+      );
+    }
+
+    if (!_ready || _controller == null) {
+      return Scaffold(
+        appBar: AppBar(title: Text('Série ${_selectedSeries}')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: Text(_bestCandidate != null ? '${_bestCandidate!.display}' : 'Série ${_selectedSeries}')),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          CameraPreview(_controller!),
+          _buildCircleGuide(),
+          _buildScoreOverlay(),
+        ],
+      ),
+    );
   }
 
   Future<void> _initCamera() async {
@@ -74,446 +152,320 @@ class _EggVerifyScreenState extends State<EggVerifyScreen> {
       (c) => c.lensDirection == CameraLensDirection.back,
       orElse: () => cameras.first,
     );
-    _sensorOrientation = cam.sensorOrientation;
+
     try {
-      final controller = CameraController(cam, ResolutionPreset.medium);
-      await controller.initialize();
+      _controller = CameraController(
+        cam,
+        ResolutionPreset.high,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+      await _controller!.initialize();
       try {
-        await controller.setFocusMode(FocusMode.auto);
-        final minZ = await controller.getMinZoomLevel();
-        final maxZ = await controller.getMaxZoomLevel();
-        await controller.setZoomLevel(1.4.clamp(minZ, maxZ));
-        await controller.setFocusPoint(const Offset(0.5, 0.5));
+        final minZ = await _controller!.getMinZoomLevel();
+        final maxZ = await _controller!.getMaxZoomLevel();
+        await _controller!.setZoomLevel(1.3.clamp(minZ, maxZ));
+        await _controller!.setFocusPoint(const Offset(0.5, 0.5));
       } catch (_) {}
       if (mounted) {
-        setState(() {
-          _cameraController = controller;
-          _isCameraReady = true;
-          _error = null;
-        });
-        _startScan();
+        setState(() => _ready = true);
+        _startSnapshotLoop();
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _error = 'Erreur caméra: $e');
-      }
+      setState(() => _error = 'Erreur caméra: $e');
     }
   }
 
-  Future<void> _onTapFocus(TapUpDetails details, BoxConstraints constraints) async {
-    final controller = _cameraController;
-    if (controller == null) return;
-    final point = Offset(
-      (details.localPosition.dx / constraints.maxWidth).clamp(0.0, 1.0),
-      (details.localPosition.dy / constraints.maxHeight).clamp(0.0, 1.0),
-    );
-    try {
-      await controller.setFocusPoint(point);
-      await controller.setExposurePoint(point);
-    } catch (_) {}
-  }
-
-  Future<void> _startScan() async {
-    if (_cameraController == null || _scanning) return;
-    setState(() {
-      _scanning = true;
-      _done = false;
-      _error = null;
+  /// Tourne la preview + prend une snapshot haute rés toutes les ~1.2s
+  void _startSnapshotLoop() {
+    _snapshotTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
+      _takeSnapshot();
     });
-    _tracker = CoverageTracker(4, 4);
-    _sharpnessGate.reset();
+    // Première immédiatement
+    _takeSnapshot();
+  }
+
+  Future<void> _takeSnapshot() async {
+    if (_done || _candidates.isEmpty || _capturing || _controller == null) return;
+    if (!_controller!.value.isInitialized) return;
+
+    _capturing = true;
     try {
-      await _cameraController!.startImageStream(_onImage);
-    } catch (e) {
-      if (mounted) setState(() => _error = 'Erreur flux: $e');
-    }
-  }
+      // Stop stream temporairement pour takePicture
+      final wasStreaming = _controller!.value.isStreamingImages;
+      if (wasStreaming) await _controller!.stopImageStream();
 
-  void _onImage(CameraImage image) {
-    if (!_scanning || _done) return;
-    final qs = quickSharpness(image);
-    if (!_sharpnessGate.isSharp(qs)) {
-      _skippedBlurry++;
+      final xfile = await _controller!.takePicture();
+      final bytes = await xfile.readAsBytes();
+
+      // Decode grayscale plein résolution (comme enrollment)
+      final gray = cv.imdecode(bytes, cv.IMREAD_GRAYSCALE);
+      if (gray.cols <= 0 || gray.rows <= 0) {
+        gray.dispose();
+        _capturing = false;
+        if (wasStreaming && mounted) await _controller!.startImageStream((_) {});
+        return;
+      }
+
+      // Crop centre (même logique que enrollment)
+      final screen = MediaQuery.of(context).size;
+      final region = centerCropRegion(
+        imgW: gray.cols.toDouble(),
+        imgH: gray.rows.toDouble(),
+        screenWidth: screen.width,
+        screenHeight: screen.height,
+      );
+      final side = (region.radius * 2).round();
+      final x = (region.cx - region.radius).round().clamp(0, gray.cols - 1);
+      final y = (region.cy - region.radius).round().clamp(0, gray.rows - 1);
+      final cw = side.clamp(1, gray.cols - x);
+      final ch = side.clamp(1, gray.rows - y);
+      final cropped = gray.region(cv.Rect(x, y, cw, ch));
+
+      // SIFT plein résolution
+      final features = extractFromMat(cropped);
+      cropped.dispose();
+      gray.dispose();
+
+      if (features == null || features.count < 10) {
+        features?.dispose();
+        _capturing = false;
+        if (wasStreaming && mounted) await _controller!.startImageStream((_) {});
+        return;
+      }
+
+      _liveFeatureCount = features.count;
+
+      // Match against all candidates, find best
+      _EggCandidate? best;
+      MatchResult? bestResult;
+      for (final c in _candidates) {
+        final result = matchAgainstIdentity(features, c.identity);
+        if (bestResult == null || result.score > bestResult.score) {
+          best = c;
+          bestResult = result;
+        }
+      }
+      features.dispose();
+
+      if (bestResult == null || best == null) {
+        _capturing = false;
+        if (wasStreaming && mounted) await _controller!.startImageStream((_) {});
+        return;
+      }
+
+      _bestCandidate = best;
+      _snapshotsTaken++;
+
+      _scoreHistory.add(bestResult.score);
+      if (_scoreHistory.length > _historySize) _scoreHistory.removeAt(0);
+      final smoothed =
+          _scoreHistory.reduce((a, b) => a + b) / _scoreHistory.length;
+
+      _currentScore = smoothed;
+      _currentMatchCount = bestResult.matchCount;
+      if (smoothed > _peakScore) _peakScore = smoothed;
+
+      if (smoothed >= _authThreshold) {
+        _stableCount++;
+      } else {
+        _stableCount = math.max(0, _stableCount - 1);
+      }
+
+      if (_stableCount >= _stableThreshold && !_done) {
+        await _confirmAuthentic();
+        return;
+      }
+
       if (mounted) setState(() {});
-      return;
-    }
-    _framesProcessed++;
 
-    final region = computeFixedCenterCircleRegion(
-      image: image,
-      sensorOrientation: _sensorOrientation,
-      screenWidth: _screenWidth,
-      screenHeight: _screenHeight,
-    );
-
-    final det = detectDigitFromImage(image, enforceCentering: false);
-    if (det.value != null) {
-      _digitBuf.add(det.value);
-      if (_digitBuf.length > _digitBufLen) _digitBuf.removeAt(0);
-      final counts = <String, int>{};
-      for (final v in _digitBuf) {
-        if (v != null) counts[v] = (counts[v] ?? 0) + 1;
+      // Restart stream
+      if (wasStreaming && mounted && !_done) {
+        await _controller!.startImageStream((_) {});
       }
-      String? stable;
-      counts.forEach((k, c) {
-        if (c >= 5) stable ??= k;
-      });
-      if (stable != null && stable != _pendingDigit && stable != _digitValue) {
-        _pendingDigit = stable;
-        if (mounted) setState(() {});
-      }
+    } catch (e) {
+      debugConsole.logError(e, source: 'egg-verify-snapshot');
     }
-    if (det.hu != null) _lastDetHu = det.hu;
-
-    _tracker.addDigit(det, _digitValue, image.width);
-
-    _baseCheckCounter++;
-    if (!_baseCaptured && region != null && _baseCheckCounter % 5 == 0) {
-      _checkAndCaptureBase(image, region);
-    }
-
-    if (region != null && _digitValue != null) {
-      final sig = SpatialSignature.extract(image);
-      _tracker.addFrame(sig);
-    }
-
-    if (_canFinish() && !_done) {
-      _finishScan();
-    }
-
-    if (mounted) {
-      setState(() {
-        _liveSharpness = qs;
-        _calibPct = _sharpnessGate.calibrationProgress;
-        _fillRatioDisplay = _lastFillRatio;
-      });
-    }
+    _capturing = false;
   }
 
-  double _displayCoverage() {
-    final rot = _tracker.coverage;
-    return _baseCaptured ? (0.5 + 0.5 * rot).clamp(0.0, 1.0) : rot;
-  }
-
-  bool _canFinish() =>
-      _baseCaptured &&
-      _candidateBase != null &&
-      ((_tracker.isStable && _displayCoverage() >= 0.9) || _framesProcessed >= 1200);
-
-  void _checkAndCaptureBase(CameraImage image, CameraCircleRegion region) {
-    if (_digitValue == null) return;
-    final frame = _baseExtractor.extract(image, region: region, logErrors: false);
-    if (frame == null) {
-      _lastFillRatio = 0.0;
-      return;
-    }
-    double minX = double.infinity, minY = double.infinity, maxX = 0, maxY = 0;
-    for (final kp in frame.keypoints) {
-      if (kp.x < minX) minX = kp.x;
-      if (kp.x > maxX) maxX = kp.x;
-      if (kp.y < minY) minY = kp.y;
-      if (kp.y > maxY) maxY = kp.y;
-    }
-    final kpArea = (maxX - minX) * (maxY - minY);
-    final circleArea = math.pi * region.radius * region.radius;
-    final fill = circleArea > 0 ? (kpArea / circleArea).clamp(0.0, 1.0) : 0.0;
-    _lastFillRatio = fill;
-
-    if (fill < 0.70 || frame.keypoints.length < 30) {
-      _baseStableSince = null;
-      frame.dispose();
-      return;
-    }
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _baseStableSince ??= now;
-    frame.dispose();
-    if (now - _baseStableSince! >= 1500) {
-      final cap = _baseExtractor.extract(image, region: region, logErrors: true);
-      if (cap != null && cap.keypoints.length >= 30) {
-        _serializeBase(cap);
-        _baseFrame?.dispose();
-        _baseFrame = cap;
-        _baseCaptured = true;
-        if (mounted) setState(() {});
-      }
-    }
-  }
-
-  void _serializeBase(TextureFrame frame) {
-    final descMat = frame.descriptors;
-    final allKps = frame.keypoints;
-    final indices = List<int>.generate(allKps.length, (i) => i)
-      ..sort((a, b) => allKps[b].response.compareTo(allKps[a].response));
-    final topN = indices.take(256).toList();
-    final descData = <List<int>>[];
-    for (final i in topN) {
-      final row = <int>[];
-      for (int j = 0; j < descMat.cols; j++) row.add(descMat.atU8(i, i1: j));
-      descData.add(row);
-    }
-    final kpData = topN
-        .map((i) => {
-              'x': allKps[i].x,
-              'y': allKps[i].y,
-              'response': allKps[i].response,
-            })
-        .toList();
-    _candidateBase = {
-      'descriptors': descData,
-      'keypoints': kpData,
-      'keypoints_count': allKps.length,
-      'sharpness': frame.sharpness,
-    };
-  }
-
-  Future<void> _confirmDigit() async {
-    if (_pendingDigit == null || _lastDetHu == null || _confirming) return;
-    setState(() => _confirming = true);
-    await Future.delayed(const Duration(milliseconds: 150));
-    if (mounted) {
-      setState(() {
-        _digitValue = _pendingDigit;
-        _pendingDigit = null;
-        _confirming = false;
-      });
-    }
-  }
-
-  Future<void> _finishScan() async {
-    if (_done || _identifying) return;
+  Future<void> _confirmAuthentic() async {
+    if (_done) return;
     setState(() {
       _done = true;
-      _saving = true;
-      _identifying = true;
     });
-    try {
-      final refs = await EggVault.loadAll();
-      final result = EggAuth.identify(
-        digit: _digitValue!,
-        candidateHu: _lastDetHu ?? [],
-        candidateBase: EggBaseSample.fromJson(_candidateBase!),
-        candidateColor: _tracker.toSignatureJson(),
-        references: refs,
-      );
-      // Données pour enregistrer une référence si aucune ne correspond.
-      Map<String, dynamic>? enroll;
-      if (result.decision == 'inconnu') {
-        enroll = {
-          'hu': _lastDetHu ?? [],
-          'base': _candidateBase!,
-          'color': _tracker.toSignatureJson(),
-        };
-      }
-      if (mounted) {
-        final cam = _cameraController;
-        _cameraController = null;
-        await cam?.stopImageStream();
-        await cam?.dispose();
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => EggFicheScreen(
-              result: result,
-              digitValue: _digitValue,
-              enrollData: enroll,
+
+    _snapshotTimer?.cancel();
+    final cam = _controller;
+    _controller = null;
+    try { await cam?.stopImageStream(); } catch (_) {}
+    await cam?.dispose();
+
+    if (mounted) {
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          icon: const Icon(Icons.check_circle, color: Colors.green, size: 64),
+          title: const Text('Authentique'),
+           content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _bestCandidate!.display,
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Score: ${(_currentScore * 100).toStringAsFixed(0)}%',
+                  style: TextStyle(color: Colors.grey[600]),
+                ),
+                Text(
+                  '$_currentMatchCount points matchés',
+                  style: TextStyle(color: Colors.grey[600]),
+                ),
+                Text(
+                  '$_snapshotsTaken snapshots analysés',
+                  style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                ),
+              ],
             ),
           ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _saving = false;
-          _done = false;
-          _identifying = false;
-        });
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Erreur identification: $e')));
-      }
+          actions: [
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.pop(context);
+              },
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
     }
   }
-
-  double _fillRatioDisplay = 0.0;
 
   @override
   void dispose() {
-    _cameraController?.stopImageStream();
-    _cameraController?.dispose();
-    _baseFrame?.dispose();
-    _baseExtractor.dispose();
+    _snapshotTimer?.cancel();
+    _controller?.stopImageStream();
+    _controller?.dispose();
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Vérifier un œuf')),
-      body: _error != null
-          ? Center(child: Text(_error!, style: const TextStyle(color: Colors.red)))
-          : LayoutBuilder(
-              builder: (_, constraints) {
-                if (_screenWidth != constraints.maxWidth ||
-                    _screenHeight != constraints.maxHeight) {
-                  _screenWidth = constraints.maxWidth;
-                  _screenHeight = constraints.maxHeight;
-                }
-                return Stack(children: [
-                  if (_isCameraReady && _cameraController != null)
-                    GestureDetector(
-                      onTapUp: (d) => _onTapFocus(d, constraints),
-                      child: CameraPreview(_cameraController!),
-                    ),
-                  if (!_isCameraReady) const Center(child: CircularProgressIndicator()),
-                  CustomPaint(
-                    painter: _CenterCircleGuide(),
-                    size: Size(constraints.maxWidth, constraints.maxHeight),
-                  ),
-                  Column(children: [
-                    const Spacer(),
-                    Container(
-                      margin: const EdgeInsets.all(24),
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Column(children: [
-                        if (_digitValue != null)
-                          Container(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: Colors.green.withOpacity(0.25),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              'Chiffre : $_digitValue',
-                              style: const TextStyle(
-                                color: Colors.greenAccent,
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          )
-                        else if (_pendingDigit != null)
-                          Column(children: [
-                            Text(
-                              'Chiffre détecté : $_pendingDigit ?',
-                              style: const TextStyle(
-                                color: Colors.amber,
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            ElevatedButton(
-                              onPressed: _confirming ? null : _confirmDigit,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.green,
-                                foregroundColor: Colors.white,
-                              ),
-                              child: _confirming
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : const Text('Confirmer le chiffre'),
-                            ),
-                          ]),
-                        const SizedBox(height: 8),
-                        Text(
-                          _saving
-                              ? 'Identification en cours...'
-                              : _baseCaptured
-                                  ? 'Base capturée ✓ — tourne l\'œuf pour la rotation'
-                                  : _digitValue != null
-                                      ? 'Montre la base (fond poncé) dans la zone verte'
-                                      : _pendingDigit != null
-                                          ? 'Confirme le chiffre détecté'
-                                          : 'Cadre l\'œuf : détecte le chiffre gravé (2/5)',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 12),
-                        Icon(
-                          _saving
-                              ? Icons.hourglass_top
-                              : (_done
-                                  ? Icons.check_circle
-                                  : Icons.threesixty),
-                          color: _done || _saving ? Colors.green : Colors.amber,
-                          size: 48,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _saving
-                              ? '100%'
-                              : 'Scan : ${(_displayCoverage() * 100).toStringAsFixed(0)}%',
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Base: ${_baseCaptured ? "capturée" : "en attente"} | Remplissage: ${(_fillRatioDisplay * 100).toStringAsFixed(0)}%',
-                          style: const TextStyle(color: Colors.white70, fontSize: 13),
-                        ),
-                        Text(
-                          'Couverture: ${(_displayCoverage() * 100).toStringAsFixed(0)}% | Frames: $_framesProcessed',
-                          style: const TextStyle(color: Colors.white70, fontSize: 13),
-                        ),
-                        Text(
-                          'Netteté: ${_liveSharpness.toStringAsFixed(1)} | Calib: $_calibPct% | Floues: $_skippedBlurry',
-                          style: const TextStyle(color: Colors.white54, fontSize: 11),
-                        ),
-                      ]),
-                    ),
-                    const SizedBox(height: 32),
-                  ]),
-                ]);
-              },
-            ),
+  Future<void> _loadIdentities(int series) async {
+    try {
+      final api = context.read<ApiClient>();
+      final list = await api.getList('/egg-identity/?series_value=$series');
+      final candidates = <_EggCandidate>[];
+      for (final item in list) {
+        final m = item as Map<String, dynamic>;
+        final serverId = m['id'] as String;
+        final display = m['display_number'] as String? ?? serverId;
+        final identityData = m['identity_data'] as Map<String, dynamic>?;
+        if (identityData == null) continue;
+        try {
+          final id = EggBaseIdentity.fromJson(identityData);
+          candidates.add(_EggCandidate(serverId: serverId, display: display, identity: id));
+        } catch (_) {}
+      }
+      if (candidates.isEmpty) {
+        setState(() {
+          _noIdentity = true;
+          _error = 'Aucun œuf série $series trouvé sur le serveur.';
+        });
+        return;
+      }
+      setState(() => _candidates = candidates);
+      _initCamera();
+    } catch (e) {
+      setState(() {
+        _noIdentity = true;
+        _error = 'Erreur chargement: $e';
+      });
+    }
+  }
+
+  Widget _buildCircleGuide() {
+    return Center(
+      child: Container(
+        width: 280,
+        height: 280,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: _done
+                ? Colors.green
+                : _currentScore >= _authThreshold
+                    ? Colors.greenAccent
+                    : Colors.white38,
+            width: 3,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildScoreOverlay() {
+    final pct = (_currentScore * 100).toStringAsFixed(0);
+    final color = _currentScore >= _authThreshold
+        ? Colors.greenAccent
+        : _currentScore >= _authThreshold * 0.5
+            ? Colors.amber
+            : Colors.white70;
+
+    return Positioned(
+      bottom: 32,
+      left: 16,
+      right: 16,
+      child: Card(
+        color: Colors.black54,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '$pct%',
+                style: TextStyle(
+                  color: color,
+                  fontSize: 42,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '$_currentMatchCount points',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              const SizedBox(height: 6),
+              LinearProgressIndicator(
+                value: _currentScore.clamp(0.0, 1.0),
+                backgroundColor: Colors.white24,
+                valueColor: AlwaysStoppedAnimation(color),
+                minHeight: 4,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _done
+                    ? 'Authentique !'
+                    : 'Live: $_liveFeatureCount | '
+                        'Pic: ${(_peakScore * 100).toStringAsFixed(0)}% | '
+                        'Stable: $_stableCount/$_stableThreshold | '
+                        'Snap: $_snapshotsTaken',
+                style: const TextStyle(color: Colors.white54, fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
 
-class _CenterCircleGuide extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final double cx = size.width / 2;
-    final double cy = size.height / 2;
-    const double radius = 200.0;
-    final paint = Paint()
-      ..color = Colors.white38
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5;
-    canvas.drawCircle(Offset(cx, cy), radius, paint);
-    final tickPaint = Paint()
-      ..color = Colors.white24
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    for (final angle in [0.0, 90.0, 180.0, 270.0]) {
-      final rad = angle * (3.14159 / 180.0);
-      final dx = radius * math.cos(rad), dy = radius * math.sin(rad);
-      canvas.drawLine(
-        Offset(cx + dx * 0.9, cy + dy * 0.9),
-        Offset(cx + dx * 1.1, cy + dy * 1.1),
-        tickPaint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _CenterCircleGuide oldDelegate) => false;
+class _EggCandidate {
+  final String serverId;
+  final String display;
+  final EggBaseIdentity identity;
+  _EggCandidate({required this.serverId, required this.display, required this.identity});
 }

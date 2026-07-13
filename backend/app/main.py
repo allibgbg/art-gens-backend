@@ -28,6 +28,14 @@ if "pieces" in inspector.get_table_names():
             conn.execute(text("ALTER TABLE pieces ADD COLUMN top_image TEXT"))
             conn.commit()
 
+# Migration manuelle : ajout de la colonne reference_pinceaux_value
+if "egg_identities" in inspector.get_table_names():
+    egg_columns = {c["name"] for c in inspector.get_columns("egg_identities")}
+    if "reference_pinceaux_value" not in egg_columns:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE egg_identities ADD COLUMN reference_pinceaux_value INTEGER DEFAULT 0"))
+            conn.commit()
+
 # Migration manuelle : élargissement de display_number (VARCHAR(10) -> VARCHAR(32))
 # car le mobile génère "$PSEUDO-$timestamp" (ex: IST-1783881379922) > 10 caractères,
 # ce qui provoquait une erreur StringDataRightTruncation à la création/finalisation.
