@@ -97,19 +97,21 @@ def _read_ply_vertices(path: str) -> np.ndarray:
 
 
 def _load_points(path: str, max_pts: int = 30000) -> np.ndarray:
-    pl = path.lower()
-    if pl.endswith(".ply"):
+    # On détecte le format par le contenu (l'endpoint renomme parfois en .obj
+    # même pour un PLY uploadé).
+    with open(path, "rb") as f:
+        head = f.read(16)
+    is_ply = head[:3] == b"ply"
+    if is_ply:
         pts = _read_ply_vertices(path)
-    elif pl.endswith(".obj"):
-        pts = _read_obj_vertices(path)
     else:
-        # tenta obj
-        try:
-            pts = _read_obj_vertices(path)
-            if len(pts) == 0:
+        pts = _read_obj_vertices(path)
+        if pts.size == 0:
+            # peut-être un PLY sans le bon préfixe repéré, tenta fallback
+            try:
                 pts = _read_ply_vertices(path)
-        except Exception:
-            pts = _read_ply_vertices(path)
+            except Exception:
+                pass
     pts = np.asarray(pts, dtype=np.float64)
     if pts.size == 0:
         raise ValueError(f"Aucun sommet trouvé dans: {path}")
