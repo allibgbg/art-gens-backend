@@ -83,11 +83,12 @@ def _reconstruct_pycolmap(images_dir: str, output_dir: str, num_images: int) -> 
     import open3d as o3d
     import cv2
 
-    # Pré-traitement pour tenir dans la RAM du plan gratuit (512 Mo) :
-    #   - sous-échantillonnage à MAX_IMAGES vues bien réparties
-    #   - redimensionnement à MAX_DIM px (COLMAP SfM est gourmand en mémoire
-    #     proportionnellement à la résolution et au nombre d'images)
-    MAX_DIM = 1024
+    # Pré-traitement garde-fou pour la RAM du plan gratuit (512 Mo).
+    # La sélection des ~40 meilleures vues ET le recadrage sur le cercle
+    # (qualité maximale, petit fichier) sont faits côté app : on ne fait PAS
+    # de réduction agressive de résolution ici. On garde juste un cap de
+    # sécurité au cas où l'app enverrait trop d'images.
+    MAX_DIM = 1600
     MAX_IMAGES = 40
     src = sorted(
         p
