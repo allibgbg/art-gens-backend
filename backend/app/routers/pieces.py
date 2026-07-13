@@ -1,7 +1,7 @@
 import uuid as _uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from typing import Optional, Any
+from typing import Optional, Any, List
 from ..database import get_db
 from ..schemas.piece import PieceCreate, PieceResponse, PieceScanSubmit
 from ..models.piece import Piece, PieceStatus, ColorEnum

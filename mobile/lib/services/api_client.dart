@@ -167,22 +167,39 @@ class ApiClient {
     if (e is ApiException) {
       return e.statusCode == 502 || e.statusCode == 503;
     }
+    if (e is http.ClientException) return true;
     if (e is SocketException || e is TimeoutException) return true;
     if (e is HttpException) return true;
+    final s = e.toString().toLowerCase();
+    if (s.contains('abort') ||
+        s.contains('reset') ||
+        s.contains('connection') ||
+        s.contains('software caused') ||
+        s.contains('failed host') ||
+        s.contains('timed out')) {
+      return true;
+    }
     return false;
   }
 
   Future<T> _retryOnSleep<T>(Future<T> Function() fn,
-      {Duration delay = const Duration(seconds: 3)}) async {
+      {Duration delay = const Duration(seconds: 2),
+      int maxRetries = 8}) async {
+    var attempt = 0;
     while (true) {
       try {
         final result = await fn();
         _backendStatus?.markAwake();
         return result;
       } catch (e) {
-        if (_isSleepError(e)) {
+        if (_isSleepError(e) && attempt < maxRetries) {
+          attempt++;
           _backendStatus?.markSleeping();
           await Future.delayed(delay);
+          delay *= 2;
+          if (delay > const Duration(seconds: 15)) {
+            delay = const Duration(seconds: 15);
+          }
         } else {
           _backendStatus?.markAwake();
           rethrow;
