@@ -6,9 +6,9 @@ Deux moteurs (le 1er disponible est utilisé) :
   B. COLMAP CLI (binaire `colmap` dans le PATH) -> pipeline complet
      feature -> matching -> mapper -> dense MVS (GPU) -> fusion -> Poisson.
 
-pycolmap est importé paresseusement et n'est PAS dans requirements.txt
-principal (pour ne pas casser le déploiement Render). Il se trouve dans
-requirements-3d.txt (image Docker du worker). Open3D est importé paresseusement.
+pycolmap et open3d sont dans requirements.txt (installés sur le backend
+Render). Ils sont importés paresseusement (uniquement lors d'une requête
+/scan3d/reconstruct) pour ne pas alourdir le démarrage.
 """
 import os
 import sys
@@ -24,8 +24,16 @@ COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
 
 
 def colmap_available() -> bool:
+    # 1) binaire COLMAP CLI (qualité supérieure, dense si GPU)
     try:
         subprocess.run([COLMAP_BIN, "--help"], capture_output=True, timeout=20)
+        return True
+    except Exception:
+        pass
+    # 2) moteur pycolmap (CPU, pip) — c'est celui utilisé sur le backend Render
+    try:
+        import pycolmap  # noqa: F401
+
         return True
     except Exception:
         return False
@@ -69,11 +77,45 @@ def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = Tr
 
 def _reconstruct_pycolmap(images_dir: str, output_dir: str, num_images: int) -> dict:
     import pathlib
+    import tempfile
     import numpy as np
     import pycolmap
     import open3d as o3d
+    import cv2
 
-    img_dir = pathlib.Path(images_dir)
+    # Pré-traitement pour tenir dans la RAM du plan gratuit (512 Mo) :
+    #   - sous-échantillonnage à MAX_IMAGES vues bien réparties
+    #   - redimensionnement à MAX_DIM px (COLMAP SfM est gourmand en mémoire
+    #     proportionnellement à la résolution et au nombre d'images)
+    MAX_DIM = 1024
+    MAX_IMAGES = 40
+    src = sorted(
+        p
+        for p in pathlib.Path(images_dir).iterdir()
+        if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    )
+    if len(src) > MAX_IMAGES:
+        step = len(src) / MAX_IMAGES
+        src = [src[int(i * step)] for i in range(MAX_IMAGES)]
+
+    proc_dir = pathlib.Path(tempfile.mkdtemp(prefix="artgens_proc_"))
+    used = 0
+    for i, p in enumerate(src):
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        scale = min(1.0, MAX_DIM / max(h, w))
+        if scale < 1.0:
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+        cv2.imwrite(str(proc_dir / f"img_{i:04d}.jpg"), img)
+        used += 1
+    if used < 3:
+        raise ValueError(
+            f"Au moins 3 photos exploitables requises (trouvé {used})."
+        )
+
+    img_dir = proc_dir
     out = pathlib.Path(output_dir)
     db = out / "database.db"
 
@@ -106,7 +148,7 @@ def _reconstruct_pycolmap(images_dir: str, output_dir: str, num_images: int) -> 
         "output_dir": output_dir,
         "dense": False,
         "engine": "pycolmap",
-        "num_images": num_images,
+        "num_images": used,
         "num_points": len(pts),
     }
 
