@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'error_reporter.dart';
+
+/// Instance partagée afin que les gestionnaires d'erreurs globaux (main.dart)
+/// puissent pousser dans la même console que l'arbre de widgets.
+final DebugConsole debugConsole = DebugConsole();
 
 class DebugConsole extends ChangeNotifier {
   final List<DebugLogEntry> _entries = [];
@@ -31,6 +36,13 @@ class DebugConsole extends ChangeNotifier {
       level: level,
       timestamp: DateTime.now(),
     ));
+    if (level == ErrorLevel.error || level == ErrorLevel.warning) {
+      reportError(
+        message: message,
+        source: source,
+        level: level == ErrorLevel.error ? 'error' : 'warning',
+      );
+    }
     notifyListeners();
   }
 
@@ -42,6 +54,12 @@ class DebugConsole extends ChangeNotifier {
       timestamp: DateTime.now(),
       stackTrace: stack,
     ));
+    reportError(
+      message: error.toString(),
+      source: source ?? 'unknown',
+      stack: stack?.toString(),
+      level: 'error',
+    );
     _visible = true;
     notifyListeners();
   }

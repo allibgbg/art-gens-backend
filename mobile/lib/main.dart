@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'services/api_client.dart';
@@ -14,10 +16,26 @@ import 'screens/make_offer_screen.dart';
 import 'screens/rotation_scan_screen.dart';
 import 'screens/trade_window_screen.dart';
 import 'services/debug_console.dart';
+import 'services/error_reporter.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const ArtGensApp());
+  initErrorReporter('https://art-gens-backend.onrender.com');
+
+  // Erreurs Flutter (build, widgets…)
+  FlutterError.onError = (details) {
+    debugConsole.logError(details.exception, source: 'flutter', stack: details.stack);
+  };
+  // Erreurs non capturées au niveau du moteur (async, platform…)
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugConsole.logError(error, source: 'platform', stack: stack);
+    return true;
+  };
+  // Filet de sécurité pour tout le reste
+  runZonedGuarded(
+    () => runApp(const ArtGensApp()),
+    (error, stack) => debugConsole.logError(error, source: 'zone', stack: stack),
+  );
 }
 
 class ArtGensApp extends StatelessWidget {
@@ -40,7 +58,7 @@ class ArtGensApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => AuthProvider(authService, apiClient)),
         ChangeNotifierProvider(create: (_) => PiecesProvider(apiClient)),
         ChangeNotifierProvider(create: (_) => TradeProvider(apiClient)),
-        ChangeNotifierProvider(create: (_) => DebugConsole()),
+        ChangeNotifierProvider.value(value: debugConsole),
       ],
       child: SleepingOverlay(
         child: MaterialApp(
