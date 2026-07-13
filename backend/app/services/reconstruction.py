@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
 
 
+class ReconstructionUnavailable(Exception):
+    """Aucun moteur de reconstruction n'est utilisables (pycolmap en échec
+    et/ou binaire colmap absent). Renvoie une 501 claire, pas une 500 opaque."""
+
+
 def colmap_available() -> bool:
     # 1) binaire COLMAP CLI (qualité supérieure, dense si GPU)
     try:
@@ -34,6 +39,14 @@ def colmap_available() -> bool:
     try:
         import pycolmap  # noqa: F401
 
+        return True
+    except Exception:
+        return False
+
+
+def _colmap_cli_available() -> bool:
+    try:
+        subprocess.run([COLMAP_BIN, "--help"], capture_output=True, timeout=20)
         return True
     except Exception:
         return False
@@ -61,21 +74,32 @@ def reconstruct_folder(images_dir: str, output_dir: str = None, dense: bool = Tr
     try:
         return _reconstruct_pycolmap(images_dir, output_dir, len(imgs))
     except ImportError:
-        logger.info("pycolmap indisponible, tentative COLMAP CLI.")
+        logger.info("pycolmap non installé, tentative COLMAP CLI.")
+    except ReconstructionUnavailable:
+        raise
     except Exception as e:
-        logger.warning("pycolmap a échoué: %s", e)
+        logger.warning("pycolmap a échoué au runtime: %s", e)
+        raise ReconstructionUnavailable("pycolmap a échoué au runtime: %s" % e)
 
-    # 2) COLMAP CLI (qualité supérieure, dense si GPU).
-    if colmap_available():
+    # 2) COLMAP CLI (qualité supérieure, dense si GPU) — uniquement si le
+    # binaire existe réellement. Sinon on renvoie une 501 claire plutôt
+    # que de planter sur un `colmap` introuvable.
+    if _colmap_cli_available():
         return _reconstruct_colmap_cli(images_dir, output_dir, dense, len(imgs))
 
-    raise RuntimeError(
-        "Aucun moteur de reconstruction disponible. "
-        "Installe 'pycolmap' (pip install pycolmap) ou le binaire 'colmap'."
+    raise ReconstructionUnavailable(
+        "Aucun moteur de reconstruction disponible (pycolmap en échec, "
+        "binaire colmap absent)."
     )
 
 
 def _reconstruct_pycolmap(images_dir: str, output_dir: str, num_images: int) -> dict:
+    # Limite les threads OpenMP/BLAS à 1 pour tenir dans la RAM du plan
+    # gratuit (512 Mo) et éviter les OOM kills pendant SfM.
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+
     import pathlib
     import tempfile
     import numpy as np

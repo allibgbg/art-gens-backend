@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 
 from ..services import reconstruction as recon
 from ..services import mesh_compare as mc
+from ..services.reconstruction import ReconstructionUnavailable
 
 router = APIRouter(prefix="/scan3d", tags=["scan3d"])
 
@@ -38,6 +39,11 @@ async def reconstruct(
             with open(dest, "wb") as out:
                 shutil.copyfileobj(f.file, out)
         result = recon.reconstruct_folder(tmp, dense=dense)
+    except ReconstructionUnavailable as e:
+        raise HTTPException(
+            status_code=501,
+            detail="COLMAP non disponible sur ce serveur: %s" % e,
+        )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
