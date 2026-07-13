@@ -215,10 +215,18 @@ def _pca_axes(P: np.ndarray) -> np.ndarray:
     return V[:, ::-1]
 
 
+def _rot_about_axis(axis: np.ndarray, theta: float) -> np.ndarray:
+    """Matrice de rotation (Rodrigues) autour d'un axe (déjà normalisé)."""
+    k = axis / (np.linalg.norm(axis) + 1e-12)
+    c, s = np.cos(theta), np.sin(theta)
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + s * K + (1 - c) * (K @ K)
+
+
 def _pca_coarse(cur: np.ndarray, ref: np.ndarray, coarse_n: int = 400) -> np.ndarray:
-    """Alignement grossier via axes principaux (l'œuf a un axe vertical marqué).
-    Teste les variantes de signe et garde la meilleure. Rapide, sans recherche
-    exhaustive en rotation."""
+    """Alignement grossier : axes principaux (fixe l'orientation des axes) puis
+    balaye l'azimut autour de l'axe vertical (l'œuf tourné à la main -> angle
+    azimuthal arbitraire que la PCA ne fixe pas). Rapide car sur sous-ensemble."""
     import itertools
     sub_ref = ref if len(ref) <= coarse_n else ref[np.random.default_rng(7).choice(len(ref), coarse_n, replace=False)]
     sub_cur = cur if len(cur) <= coarse_n else cur[np.random.default_rng(9).choice(len(cur), coarse_n, replace=False)]
@@ -237,8 +245,25 @@ def _pca_coarse(cur: np.ndarray, ref: np.ndarray, coarse_n: int = 400) -> np.nda
             best_d = m
             best_R = R
     if best_R is None:
-        return cur
-    return (best_R @ cur.T).T
+        best_R = np.eye(3)
+    # azimuth autour de l'axe vertical = 1er axe principal de la réf dans le repère
+    # aligné. Après R, le nuage est dans le repère de la réf ; l'axe vertical est
+    # la 1re colonne de Vr (variance max). On balaye 24 angles.
+    aligned = (best_R @ cur.T).T
+    vertical = Vr[:, 0]
+    best_az = 0.0
+    best_az_d = np.inf
+    n_az = 24
+    for k in range(n_az):
+        th = 2.0 * np.pi * k / n_az
+        Rz = _rot_about_axis(vertical, th)
+        moved = (Rz @ aligned.T).T
+        m = float(_nn_dist(moved, sub_ref).mean())
+        if m < best_az_d:
+            best_az_d = m
+            best_az = th
+    Rfinal = _rot_about_axis(vertical, best_az) @ best_R
+    return (Rfinal @ cur.T).T
 
 
 def compare_meshes(ref_path: str, curr_path: str, threshold: float = 0.05) -> dict:
