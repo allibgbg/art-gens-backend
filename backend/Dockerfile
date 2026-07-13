@@ -6,6 +6,8 @@ WORKDIR /app
 # l'image slim. Sans ça, pycolmap plante au runtime (libgomp.so.1 introuvable).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
+    && ldconfig \
+    && ls -l /usr/lib/x86_64-linux-gnu/libgomp.so.1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
