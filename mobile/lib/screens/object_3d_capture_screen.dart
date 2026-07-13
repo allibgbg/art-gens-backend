@@ -8,7 +8,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../services/texture_extraction.dart' show yPlaneToGrayMat;
 import '../services/api_client.dart';
-import '../services/colmap_ffi.dart';
 
 /// Outil de capture 3D séparé du scan de nouvel objet.
 /// Capture une série de photos "live" (auto sur mouvement ou manuel) pendant
@@ -156,51 +155,27 @@ class _Object3DCaptureScreenState extends State<Object3DCaptureScreen> {
       return;
     }
 
-    // Reconstruct : d'abord COLMAP on-device si le module natif est présent,
-    // sinon repli sur le backend (pycolmap).
+    // Reconstruction COLMAP côté backend (instance unique, là où c'est le
+    // mieux placé : serveur). Pas de reconstruction sur le téléphone.
     setState(() => _processing = true);
-    String meshPath = '';
     try {
-      bool didLocal = false;
-      if (ColmapFfi.available) {
-        final outDir = '$_dir/recon_local';
-        await Directory(outDir).create(recursive: true);
-        final rc = await ColmapFfi.reconstruct(_dir, outDir);
-        final localPly = '$outDir/model.ply';
-        if (rc == 0 && File(localPly).existsSync()) {
-          final ts = DateTime.now().millisecondsSinceEpoch;
-          meshPath = '$_dir/model_$ts.ply';
-          await File(localPly).copy(meshPath);
-          _lastMeshPath = meshPath;
-          msg += '\nMesh reconstruit ON-DEVICE (COLMAP): $meshPath';
-          didLocal = true;
-        } else {
-          msg += '\nReconstruction locale indisponible (rc=$rc) -> backend.';
-        }
-      } else {
-        msg += '\nModule COLMAP local absent -> backend.';
-      }
-
-      if (!didLocal) {
-        final api = context.read<ApiClient>();
-        final res = await api.reconstruct3D(_frames, dense: true);
-        final info = res['info'] as Map<String, dynamic>? ?? {};
-        final bytes = res['meshBytes'] as Uint8List;
-        final ts = DateTime.now().millisecondsSinceEpoch;
-        meshPath = '$_dir/model_$ts.obj';
-        await File(meshPath).writeAsBytes(bytes);
-        _lastMeshPath = meshPath;
-        msg += '\nMesh reconstruit: $meshPath';
-        if (info['num_images'] != null) {
-          msg += '\n(images traitées: ${info['num_images']}, dense: ${info['dense']})';
-        }
+      final api = context.read<ApiClient>();
+      final res = await api.reconstruct3D(_frames, dense: true);
+      final info = res['info'] as Map<String, dynamic>? ?? {};
+      final bytes = res['meshBytes'] as Uint8List;
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final meshPath = '$_dir/model_$ts.obj';
+      await File(meshPath).writeAsBytes(bytes);
+      _lastMeshPath = meshPath;
+      msg += '\nMesh reconstruit: $meshPath';
+      if (info['num_images'] != null) {
+        msg += '\n(images traitées: ${info['num_images']}, dense: ${info['dense']})';
       }
 
       // Si une référence existe déjà, comparer pour score d'auth.
       final refPath = '$_dir/reference.obj';
       if (File(refPath).existsSync()) {
         try {
-          final api = context.read<ApiClient>();
           final score = await api.compare3D(refPath, meshPath);
           _lastScore = score;
           final sc = (score['score'] as num?)?.toDouble() ?? 0.0;
