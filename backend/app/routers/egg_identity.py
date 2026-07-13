@@ -17,6 +17,13 @@ class EggIdentityCreate(BaseModel):
     identity_data: dict  # {version, image_w, image_h, quality, points: [...]}
 
 
+class EggIdentityUpdate(BaseModel):
+    display_number: Optional[str] = None
+    series_value: Optional[int] = None
+    digit_number: Optional[str] = None
+    notes: Optional[str] = None
+
+
 router = APIRouter(prefix="/egg-identity", tags=["egg-identity"])
 
 
@@ -80,6 +87,17 @@ def get_egg_identity(egg_id: str, db: Session = Depends(get_db)):
         "identity_data": egg.identity_data,
         "created_at": egg.created_at.isoformat() if egg.created_at else None,
     }
+
+
+@router.patch("/{egg_id}")
+def update_egg_identity(egg_id: str, data: EggIdentityUpdate, db: Session = Depends(get_db)):
+    egg = db.query(EggIdentity).filter(EggIdentity.id == egg_id).first()
+    if not egg:
+        return {"error": "not_found"}
+    for key, val in data.model_dump(exclude_none=True).items():
+        setattr(egg, key, val)
+    db.commit()
+    return {"status": "ok"}
 
 
 @router.delete("/{egg_id}")
