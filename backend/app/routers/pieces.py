@@ -232,13 +232,3 @@ def get_provenance(piece_id: str, db: Session = Depends(get_db)):
         ProvenanceEvent.piece_id == piece_id
     ).order_by(ProvenanceEvent.timestamp.asc()).all()
     return events
-
-
-@router.delete("/{piece_id}")
-def delete_piece(piece_id: str, db: Session = Depends(get_db)):
-    piece = db.query(Piece).filter(Piece.id == piece_id).first()
-    if not piece:
-        return {"error": "not_found"}
-    db.delete(piece)
-    db.commit()
-    return {"status": "deleted"}
