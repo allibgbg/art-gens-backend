@@ -208,46 +208,55 @@ def _icp(src: np.ndarray, dst: np.ndarray, max_iter: int = 50, tol: float = 1e-4
     return T, X
 
 
+def _pca_axes(P: np.ndarray) -> np.ndarray:
+    """3 axes principaux (colonnes) de P, triés par variance décroissante."""
+    cov = np.cov((P - P.mean(axis=0)).T)
+    w, V = np.linalg.eigh(cov)
+    return V[:, ::-1]
+
+
+def _pca_coarse(cur: np.ndarray, ref: np.ndarray, coarse_n: int = 400) -> np.ndarray:
+    """Alignement grossier via axes principaux (l'œuf a un axe vertical marqué).
+    Teste les variantes de signe et garde la meilleure. Rapide, sans recherche
+    exhaustive en rotation."""
+    import itertools
+    sub_ref = ref if len(ref) <= coarse_n else ref[np.random.default_rng(7).choice(len(ref), coarse_n, replace=False)]
+    sub_cur = cur if len(cur) <= coarse_n else cur[np.random.default_rng(9).choice(len(cur), coarse_n, replace=False)]
+    Vr = _pca_axes(sub_ref)
+    Vc = _pca_axes(sub_cur)
+    best_R = None
+    best_d = np.inf
+    for sx, sy, sz in itertools.product([1, -1], repeat=3):
+        D = np.diag([sx, sy, sz]).astype(np.float64)
+        R = Vr @ D @ Vc.T
+        if abs(np.linalg.det(R) - 1.0) > 1e-6:
+            continue
+        moved = (R @ cur.T).T
+        m = float(_nn_dist(moved, sub_ref).mean())
+        if m < best_d:
+            best_d = m
+            best_R = R
+    if best_R is None:
+        return cur
+    return (best_R @ cur.T).T
+
+
 def compare_meshes(ref_path: str, curr_path: str, threshold: float = 0.05) -> dict:
     """Compare le nuage candidat au nuage de référence et renvoie un score
-    d'authenticité dans [0,1] (fraction de points dans le seuil)."""
-    ref = _normalize(_load_points(ref_path))
-    cur = _normalize(_load_points(curr_path))
+    d'authenticité dans [0,1]. PCA coarse + ICP léger, ~1500 points."""
+    ref = _normalize(_load_points(ref_path, max_pts=1500))
+    cur = _normalize(_load_points(curr_path, max_pts=1500))
 
-    # Recherche grossière en rotation autour de l'axe vertical (l'œuf tourné
-    # à la main -> orientation azimuthale arbitraire). On choisit la rotation
-    # qui minimise la distance de Chamfer avant ICP fin.
-    best_T = None
-    best_cur = None
-    best_mean = np.inf
-    n_steps = 24
-    for k in range(n_steps):
-        theta = 2.0 * np.pi * k / n_steps
-        Rc = _rot_z(theta)
-        moved = (Rc @ cur.T).T
-        d_ab, d_ba = _chamfer(moved, ref)
-        mean = 0.5 * (d_ab.mean() + d_ba.mean())
-        if mean < best_mean:
-            best_mean = mean
-            best_T = np.eye(4)
-            best_T[:3, :3] = Rc
-            best_cur = moved
-
-    # ICP de raffinement (sur le meilleur point de départ)
-    Ticp, aligned = _icp(best_cur, ref, max_iter=40)
+    aligned = _pca_coarse(cur, ref, coarse_n=400)
+    _, aligned = _icp(aligned, ref, max_iter=20)
 
     d_ab, d_ba = _chamfer(aligned, ref)
     mean = float(0.5 * (d_ab.mean() + d_ba.mean()))
     maxd = float(d_ab.max())
     rmse = float(np.sqrt(0.5 * (np.mean(d_ab ** 2) + np.mean(d_ba ** 2))))
-    within = float((d_ab < threshold).mean())
-
-    # score global : moyenne géométrique du rappel dans les deux sens
     recall_ab = float((d_ab < threshold).mean())
     recall_ba = float((d_ba < threshold).mean())
-    score = 0.0
-    if recall_ab > 0 and recall_ba > 0:
-        score = float(np.sqrt(recall_ab * recall_ba))
+    score = float(np.sqrt(recall_ab * recall_ba)) if recall_ab > 0 and recall_ba > 0 else 0.0
 
     return {
         "score": score,
@@ -256,7 +265,7 @@ def compare_meshes(ref_path: str, curr_path: str, threshold: float = 0.05) -> di
         "mean_distance_norm": mean,
         "max_distance_norm": maxd,
         "rmse_norm": rmse,
-        "fraction_within_threshold": within,
+        "fraction_within_threshold": recall_ab,
         "threshold": threshold,
         "n_ref": int(len(ref)),
         "n_candidate": int(len(cur)),
