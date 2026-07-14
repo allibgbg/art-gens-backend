@@ -24,6 +24,7 @@ class EggIdentityUpdate(BaseModel):
     reference_pinceaux_value: Optional[int] = None
     digit_number: Optional[str] = None
     notes: Optional[str] = None
+    face_photo: Optional[str] = None  # base64 JPEG
 
 
 router = APIRouter(prefix="/egg-identity", tags=["egg-identity"])

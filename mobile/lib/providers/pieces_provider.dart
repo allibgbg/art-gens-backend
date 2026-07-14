@@ -96,6 +96,7 @@ class PiecesProvider extends ChangeNotifier {
   Future<String?> addEggIdentity({
     required String displayNumber,
     required int seriesValue,
+    int? pinceauxValue,
     String? digitNumber,
     String? notes,
     String? facePhoto,
@@ -105,6 +106,7 @@ class PiecesProvider extends ChangeNotifier {
       final result = await _api.post('/egg-identity/', body: {
         'display_number': displayNumber,
         'series_value': seriesValue,
+        'reference_pinceaux_value': pinceauxValue ?? 0,
         'digit_number': digitNumber,
         'notes': notes,
         'face_photo': facePhoto,
@@ -116,6 +118,7 @@ class PiecesProvider extends ChangeNotifier {
           'id': serverId,
           'display_number': displayNumber,
           'series_value': seriesValue,
+          'reference_pinceaux_value': pinceauxValue ?? 0,
           'digit_number': digitNumber,
           'notes': notes,
           'points_count': (identityData['points'] as List?)?.length ?? 0,
@@ -134,6 +137,8 @@ class PiecesProvider extends ChangeNotifier {
     String? displayNumber,
     String? notes,
     int? pinceauxValue,
+    String? facePhoto,
+    String? localPhotoPath,
   }) async {
     final serverId = _extractServerId(pieceId);
     final body = <String, dynamic>{};
@@ -141,6 +146,7 @@ class PiecesProvider extends ChangeNotifier {
     if (displayNumber != null) body['display_number'] = displayNumber;
     if (notes != null) body['notes'] = notes;
     if (pinceauxValue != null) body['reference_pinceaux_value'] = pinceauxValue;
+    if (facePhoto != null) body['face_photo'] = facePhoto;
     if (body.isEmpty) return;
 
     try {
@@ -160,7 +166,7 @@ class PiecesProvider extends ChangeNotifier {
       materialNotes: notes ?? old.materialNotes,
       creationDate: old.creationDate,
       artistNote: old.artistNote,
-      photoUrl: old.photoUrl,
+      photoUrl: localPhotoPath ?? old.photoUrl,
     );
     notifyListeners();
   }

@@ -1,5 +1,9 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:opencv_dart/opencv_dart.dart' as cv;
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../config.dart';
 import '../providers/auth_provider.dart';
@@ -405,6 +409,63 @@ class _LocalEggEditScreenState extends State<_LocalEggEditScreen> {
     super.dispose();
   }
 
+  Future<void> _retakeFacePhoto() async {
+    try {
+      final cameras = await availableCameras();
+      final cam = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      final controller = CameraController(cam, ResolutionPreset.high);
+      await controller.initialize();
+      await controller.setFocusPoint(const Offset(0.5, 0.5));
+
+      final xfile = await controller.takePicture();
+      await controller.dispose();
+
+      final bytes = await File(xfile.path).readAsBytes();
+      final colorMat = cv.imdecode(bytes, 1);
+      if (colorMat.cols <= 0) return;
+
+      final cropped = cropEgg(colorMat);
+      colorMat.dispose();
+
+      // Save locally
+      final dir = await getApplicationDocumentsDirectory();
+      final cacheDir = Directory('${dir.path}/egg_faces');
+      await cacheDir.create(recursive: true);
+      final serverId = widget.piece.id.replaceFirst('egg_', '');
+      final localPath = '${cacheDir.path}/$serverId.jpg';
+      cv.imwrite(localPath, cropped);
+      cropped.dispose();
+
+      // Read back as base64 for server upload
+      final jpgBytes = await File(localPath).readAsBytes();
+      final b64 = base64Encode(jpgBytes);
+
+      // Upload to server + update local cache
+      if (mounted) {
+        await context.read<PiecesProvider>().updateEggIdentity(
+          widget.piece.id,
+          facePhoto: b64,
+          localPhotoPath: localPath,
+        );
+        setState(() => _hasPhoto = true);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Photo de face remplacée')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur: $e')),
+        );
+      }
+    }
+  }
+
   void _confirmDelete(BuildContext context) {
     showDialog(
       context: context,
@@ -455,17 +516,26 @@ class _LocalEggEditScreenState extends State<_LocalEggEditScreen> {
           children: [
             if (_hasPhoto)
               Center(
-                child: Container(
-                  width: 160, height: 160,
-                  margin: const EdgeInsets.only(bottom: 24),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade300),
-                    image: DecorationImage(
-                      image: FileImage(File(widget.piece.photoUrl!)),
-                      fit: BoxFit.cover,
+                child: Column(
+                  children: [
+                    Container(
+                      width: 160, height: 160,
+                      margin: const EdgeInsets.only(bottom: 8),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey.shade300),
+                        image: DecorationImage(
+                          image: FileImage(File(widget.piece.photoUrl!)),
+                          fit: BoxFit.cover,
+                        ),
+                      ),
                     ),
-                  ),
+                    TextButton.icon(
+                      onPressed: _retakeFacePhoto,
+                      icon: const Icon(Icons.camera_alt, size: 18),
+                      label: const Text('Reprendre la photo de face'),
+                    ),
+                  ],
                 ),
               ),
             TextField(

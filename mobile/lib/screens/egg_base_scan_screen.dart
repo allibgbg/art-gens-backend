@@ -126,7 +126,7 @@ class _EggBaseScanScreenState extends State<EggBaseScanScreen> {
       if (isFace) {
         outPath = '$_dir/face_$ts.jpg';
         final colorMat = cv.imdecode(bytes, 1);
-        final cropped = _cropEgg(colorMat);
+        final cropped = cropEgg(colorMat);
         cv.imwrite(outPath, cropped);
         cropped.dispose();
         colorMat.dispose();
@@ -205,110 +205,6 @@ class _EggBaseScanScreenState extends State<EggBaseScanScreen> {
     _busy = false;
     if (mounted && _controller!.value.isInitialized) {
       await _controller!.startImageStream((_) {});
-    }
-  }
-
-  /// Post-prod : isole l'œuf sur fond blanc, 512×512.
-  cv.Mat _cropEgg(cv.Mat colorMat) {
-    try {
-      final w = colorMat.cols;
-      final h = colorMat.rows;
-
-      // 1. Détection contour → trouver la zone de l'œuf
-      final gray = cv.cvtColor(colorMat, cv.COLOR_BGR2GRAY);
-      final blurred = cv.gaussianBlur(gray, (7, 7), 0);
-      gray.dispose();
-      final edges = cv.canny(blurred, 30, 80);
-      blurred.dispose();
-      final kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (15, 15));
-      final dilated = cv.dilate(edges, kernel);
-      edges.dispose();
-      kernel.dispose();
-
-      final (contours, _) = cv.findContours(dilated, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-      dilated.dispose();
-      if (contours.isEmpty) return colorMat;
-
-      final cx = w ~/ 2;
-      final cy = h ~/ 2;
-      int bestIdx = -1;
-      double maxArea = 0;
-      for (int i = 0; i < contours.length; i++) {
-        final area = cv.contourArea(contours[i]);
-        final r = cv.boundingRect(contours[i]);
-        if (area > maxArea &&
-            cx >= r.x && cx <= r.x + r.width &&
-            cy >= r.y && cy <= r.y + r.height) {
-          maxArea = area;
-          bestIdx = i;
-        }
-      }
-      if (bestIdx < 0) {
-        for (int i = 0; i < contours.length; i++) {
-          final area = cv.contourArea(contours[i]);
-          if (area > maxArea) { maxArea = area; bestIdx = i; }
-        }
-      }
-      if (bestIdx < 0 || maxArea < 1000) return colorMat;
-
-      // 2. Masque drawContours FILLED, erodé pour supprimer le halo
-      final mask = cv.Mat.zeros(h, w, cv.MatType.CV_8UC1);
-      cv.drawContours(mask, contours, bestIdx, cv.Scalar.all(255), thickness: cv.FILLED);
-      final erodeK = cv.getStructuringElement(cv.MORPH_ELLIPSE, (7, 7));
-      final tightMask = cv.erode(mask, erodeK);
-      mask.dispose();
-      erodeK.dispose();
-
-      // 3. Œuf seul sur fond noir (bitwiseAND avec masque)
-      final eggOnBlack = cv.bitwiseAND(colorMat, colorMat, mask: tightMask);
-
-      // 4. Masque inversé → blanc uniquement autour de l'œuf
-      final (_, white1ch) = cv.threshold(
-        cv.Mat.zeros(h, w, cv.MatType.CV_8UC1), 0, 255, cv.THRESH_BINARY);
-      final invMask = cv.subtract(white1ch, tightMask);
-      white1ch.dispose();
-      tightMask.dispose();
-      final whiteBgr = cv.cvtColor(invMask, cv.COLOR_GRAY2BGR);
-      final bgWhite = cv.bitwiseAND(whiteBgr, whiteBgr, mask: invMask);
-      invMask.dispose();
-      whiteBgr.dispose();
-
-      // 5. Combiner : œuf + fond blanc
-      final white = cv.bitwiseOR(eggOnBlack, bgWhite);
-      eggOnBlack.dispose();
-      bgWhite.dispose();
-
-      // 4. Crop tight au bounding rect
-      final eggRect = cv.boundingRect(contours[bestIdx]);
-      final pad = (eggRect.width * 0.03).round().clamp(2, 15);
-      final rx = (eggRect.x - pad).clamp(0, w - 1);
-      final ry = (eggRect.y - pad).clamp(0, h - 1);
-      final rw = (eggRect.width + pad * 2).clamp(1, w - rx);
-      final rh = (eggRect.height + pad * 2).clamp(1, h - ry);
-      final cropped = white.region(cv.Rect(rx, ry, rw, rh));
-      white.dispose();
-
-      // 5. Resize + centrer sur 512×512
-      final shortSide = rw < rh ? rw : rh;
-      final scale = (512 * 0.90 / shortSide).clamp(0.1, 5.0);
-      final nw = (rw * scale).round().clamp(1, 512);
-      final nh = (rh * scale).round().clamp(1, 512);
-      final resized = cv.resize(cropped, (nw, nh));
-      cropped.dispose();
-
-      final canvas = cv.cvtColor(
-        cv.threshold(cv.Mat.zeros(512, 512, cv.MatType.CV_8UC1), 0, 255, cv.THRESH_BINARY).$2,
-        cv.COLOR_GRAY2BGR);
-      final ox = ((512 - nw) ~/ 2).clamp(0, 511);
-      final oy = ((512 - nh) ~/ 2).clamp(0, 511);
-      final roi = canvas.region(cv.Rect(ox, oy, nw, nh));
-      resized.copyTo(roi);
-      resized.dispose();
-      roi.dispose();
-
-      return canvas;
-    } catch (_) {
-      return colorMat;
     }
   }
 
@@ -673,6 +569,104 @@ class _EggBaseScanScreenState extends State<EggBaseScanScreen> {
   }
 }
 
+/// Post-prod : isole l'œuf sur fond blanc, 512×512.
+/// Utilisé par l'enrollment ET la reprise de photo dans l'édition.
+cv.Mat cropEgg(cv.Mat colorMat) {
+  try {
+    final w = colorMat.cols;
+    final h = colorMat.rows;
+
+    final gray = cv.cvtColor(colorMat, cv.COLOR_BGR2GRAY);
+    final blurred = cv.gaussianBlur(gray, (7, 7), 0);
+    gray.dispose();
+    final edges = cv.canny(blurred, 30, 80);
+    blurred.dispose();
+    final kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (15, 15));
+    final dilated = cv.dilate(edges, kernel);
+    edges.dispose();
+    kernel.dispose();
+
+    final (contours, _) = cv.findContours(dilated, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    dilated.dispose();
+    if (contours.isEmpty) return colorMat;
+
+    final cx = w ~/ 2;
+    final cy = h ~/ 2;
+    int bestIdx = -1;
+    double maxArea = 0;
+    for (int i = 0; i < contours.length; i++) {
+      final area = cv.contourArea(contours[i]);
+      final r = cv.boundingRect(contours[i]);
+      if (area > maxArea &&
+          cx >= r.x && cx <= r.x + r.width &&
+          cy >= r.y && cy <= r.y + r.height) {
+        maxArea = area;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) {
+      for (int i = 0; i < contours.length; i++) {
+        final area = cv.contourArea(contours[i]);
+        if (area > maxArea) { maxArea = area; bestIdx = i; }
+      }
+    }
+    if (bestIdx < 0 || maxArea < 1000) return colorMat;
+
+    final mask = cv.Mat.zeros(h, w, cv.MatType.CV_8UC1);
+    cv.drawContours(mask, contours, bestIdx, cv.Scalar.all(255), thickness: cv.FILLED);
+    final erodeK = cv.getStructuringElement(cv.MORPH_ELLIPSE, (7, 7));
+    final tightMask = cv.erode(mask, erodeK);
+    mask.dispose();
+    erodeK.dispose();
+
+    final eggOnBlack = cv.bitwiseAND(colorMat, colorMat, mask: tightMask);
+
+    final (_, white1ch) = cv.threshold(
+      cv.Mat.zeros(h, w, cv.MatType.CV_8UC1), 0, 255, cv.THRESH_BINARY);
+    final invMask = cv.subtract(white1ch, tightMask);
+    white1ch.dispose();
+    tightMask.dispose();
+    final whiteBgr = cv.cvtColor(invMask, cv.COLOR_GRAY2BGR);
+    final bgWhite = cv.bitwiseAND(whiteBgr, whiteBgr, mask: invMask);
+    invMask.dispose();
+    whiteBgr.dispose();
+
+    final white = cv.bitwiseOR(eggOnBlack, bgWhite);
+    eggOnBlack.dispose();
+    bgWhite.dispose();
+
+    final eggRect = cv.boundingRect(contours[bestIdx]);
+    final pad = (eggRect.width * 0.03).round().clamp(2, 15);
+    final rx = (eggRect.x - pad).clamp(0, w - 1);
+    final ry = (eggRect.y - pad).clamp(0, h - 1);
+    final rw = (eggRect.width + pad * 2).clamp(1, w - rx);
+    final rh = (eggRect.height + pad * 2).clamp(1, h - ry);
+    final cropped = white.region(cv.Rect(rx, ry, rw, rh));
+    white.dispose();
+
+    final longSide = rw > rh ? rw : rh;
+    final scale = (512 * 0.90 / longSide).clamp(0.1, 5.0);
+    final nw = (rw * scale).round().clamp(1, 512);
+    final nh = (rh * scale).round().clamp(1, 512);
+    final resized = cv.resize(cropped, (nw, nh));
+    cropped.dispose();
+
+    final canvas = cv.cvtColor(
+      cv.threshold(cv.Mat.zeros(512, 512, cv.MatType.CV_8UC1), 0, 255, cv.THRESH_BINARY).$2,
+      cv.COLOR_GRAY2BGR);
+    final ox = ((512 - nw) ~/ 2).clamp(0, 511);
+    final oy = ((512 - nh) ~/ 2).clamp(0, 511);
+    final roi = canvas.region(cv.Rect(ox, oy, nw, nh));
+    resized.copyTo(roi);
+    resized.dispose();
+    roi.dispose();
+
+    return canvas;
+  } catch (_) {
+    return colorMat;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Formulaire d'inscription + ajout à la collection
 // ---------------------------------------------------------------------------
@@ -689,6 +683,7 @@ class _EnrollBaseFormState extends State<_EnrollBaseForm> {
   final _seriesCtrl = TextEditingController(text: '2');
   final _digitCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
+  final _pinceauxCtrl = TextEditingController(text: '0');
   bool _saving = false;
 
   @override
@@ -696,6 +691,7 @@ class _EnrollBaseFormState extends State<_EnrollBaseForm> {
     _seriesCtrl.dispose();
     _digitCtrl.dispose();
     _notesCtrl.dispose();
+    _pinceauxCtrl.dispose();
     super.dispose();
   }
 
@@ -720,6 +716,7 @@ class _EnrollBaseFormState extends State<_EnrollBaseForm> {
       final serverId = await context.read<PiecesProvider>().addEggIdentity(
         displayNumber: displayNum,
         seriesValue: series,
+        pinceauxValue: int.tryParse(_pinceauxCtrl.text) ?? 0,
         digitNumber: _digitCtrl.text.isNotEmpty ? _digitCtrl.text : null,
         notes: _notesCtrl.text.isNotEmpty ? _notesCtrl.text : null,
         facePhoto: faceBase64,
@@ -804,6 +801,12 @@ class _EnrollBaseFormState extends State<_EnrollBaseForm> {
               controller: _notesCtrl,
               decoration: const InputDecoration(labelText: 'Nom', hintText: 'Nom de l\'œuf...'),
               maxLines: 3,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _pinceauxCtrl,
+              decoration: const InputDecoration(labelText: 'Valeur pinceaux', hintText: 'Ex: 100'),
+              keyboardType: TextInputType.number,
             ),
             const Spacer(),
 

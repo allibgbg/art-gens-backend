@@ -362,7 +362,12 @@ class _EggVerifyScreenState extends State<EggVerifyScreen> {
         final m = item as Map<String, dynamic>;
         final serverId = m['id'] as String;
         final display = m['display_number'] as String? ?? serverId;
-        final identityData = m['identity_data'] as Map<String, dynamic>?;
+        // The list endpoint doesn't include identity_data, fetch detail
+        Map<String, dynamic>? identityData;
+        try {
+          final detail = await api.get('/egg-identity/$serverId');
+          identityData = detail['identity_data'] as Map<String, dynamic>?;
+        } catch (_) {}
         if (identityData == null) continue;
         try {
           final id = EggBaseIdentity.fromJson(identityData);
