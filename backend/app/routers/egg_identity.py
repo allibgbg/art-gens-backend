@@ -1,11 +1,13 @@
 import uuid as _uuid
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from pydantic import BaseModel
+from datetime import datetime
 from ..database import get_db
 from ..models.egg_identity import EggIdentity
-from ..services.auth_service import get_current_artist
+from ..services.auth_service import get_current_artist, get_current_user
+from ..models.user import User
 
 
 class EggIdentityCreate(BaseModel):
@@ -71,6 +73,29 @@ def list_egg_identities(
             "has_face_photo": e.face_photo is not None,
             "has_identity": e.identity_data is not None,
             "points_count": len(e.identity_data.get("points", [])) if e.identity_data else 0,
+            "current_owner_id": e.current_owner_id,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in eggs
+    ]
+
+
+@router.get("/me")
+def get_my_egg_pieces(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    eggs = db.query(EggIdentity).filter(EggIdentity.current_owner_id == current_user.id).all()
+    return [
+        {
+            "id": e.id,
+            "display_number": e.display_number,
+            "series_value": e.series_value,
+            "reference_pinceaux_value": e.reference_pinceaux_value or 0,
+            "digit_number": e.digit_number,
+            "notes": e.notes,
+            "has_face_photo": e.face_photo is not None,
+            "current_owner_id": e.current_owner_id,
             "created_at": e.created_at.isoformat() if e.created_at else None,
         }
         for e in eggs
@@ -91,8 +116,21 @@ def get_egg_identity(egg_id: str, db: Session = Depends(get_db)):
         "notes": egg.notes,
         "face_photo": egg.face_photo,
         "identity_data": egg.identity_data,
+        "current_owner_id": egg.current_owner_id,
         "created_at": egg.created_at.isoformat() if egg.created_at else None,
     }
+
+
+@router.patch("/{egg_id}/claim")
+def claim_egg(egg_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    egg = db.query(EggIdentity).filter(EggIdentity.id == egg_id).first()
+    if not egg:
+        raise HTTPException(status_code=404, detail="Pierre introuvable")
+    if egg.current_owner_id:
+        raise HTTPException(status_code=400, detail="Cette pierre appartient déjà à quelqu'un")
+    egg.current_owner_id = current_user.id
+    db.commit()
+    return {"status": "ok", "owner_id": current_user.id}
 
 
 @router.patch("/{egg_id}")

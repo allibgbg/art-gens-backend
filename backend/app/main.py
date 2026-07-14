@@ -14,6 +14,9 @@ from .models.trade_session import TradeSession
 from .models.pinceaux_transaction import PinceauxTransaction
 from .models.egg_identity import EggIdentity
 from .routers import auth, users, pieces, offers, trades, scan, digit_auth, scan3d, logs, egg_identity
+from .routers.notifications import router as notifications_router
+from .routers.egg_offers import router as egg_offers_router
+from .routers.messages import router as messages_router
 from .websocket.trade_handler import router as ws_router
 
 Base.metadata.create_all(bind=engine)
@@ -28,7 +31,23 @@ if "pieces" in inspector.get_table_names():
             conn.execute(text("ALTER TABLE pieces ADD COLUMN top_image TEXT"))
             conn.commit()
 
-# Migration manuelle : ajout de la colonne reference_pinceaux_value
+# Migration manuelle : ajout de la colonne current_owner_id aux egg_identities
+if "egg_identities" in inspector.get_table_names():
+    egg_columns = {c["name"] for c in inspector.get_columns("egg_identities")}
+    if "current_owner_id" not in egg_columns:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE egg_identities ADD COLUMN current_owner_id VARCHAR(36)"))
+            conn.commit()
+
+# Migration manuelle : ajout des tables de notification, offres egg, messages
+from .models.notification import Notification
+from .models.egg_offer import EggOffer
+from .models.trade_message import TradeMessage
+Base.metadata.create_all(bind=engine, tables=[
+    Notification.__table__,
+    EggOffer.__table__,
+    TradeMessage.__table__,
+])
 if "egg_identities" in inspector.get_table_names():
     egg_columns = {c["name"] for c in inspector.get_columns("egg_identities")}
     if "reference_pinceaux_value" not in egg_columns:
@@ -69,6 +88,9 @@ app.include_router(digit_auth.router)
 app.include_router(scan3d.router)
 app.include_router(logs.router)
 app.include_router(egg_identity.router)
+app.include_router(notifications_router)
+app.include_router(egg_offers_router)
+app.include_router(messages_router)
 
 
 @app.exception_handler(Exception)

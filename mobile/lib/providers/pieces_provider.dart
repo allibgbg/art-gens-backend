@@ -41,6 +41,7 @@ class PiecesProvider extends ChangeNotifier {
       referencePinceauxValue: m['reference_pinceaux_value'] as int? ?? 0,
       colorPrimary: 'multicolore',
       materialNotes: m['notes'] as String?,
+      currentOwnerId: m['current_owner_id'] as String?,
       creationDate: m['created_at'] != null
           ? DateTime.tryParse(m['created_at'] as String)
           : null,
@@ -178,6 +179,69 @@ class PiecesProvider extends ChangeNotifier {
     } catch (_) {}
     _eggPieces.removeWhere((p) => p.id == pieceId);
     notifyListeners();
+  }
+
+  Future<bool> claimEgg(String pieceId) async {
+    final serverId = _extractServerId(pieceId);
+    try {
+      final result = await _api.patch('/egg-identity/$serverId/claim');
+      final idx = _eggPieces.indexWhere((p) => p.id == pieceId);
+      if (idx >= 0) {
+        final old = _eggPieces[idx];
+        _eggPieces[idx] = Piece(
+          id: old.id,
+          displayNumber: old.displayNumber,
+          seriesValue: old.seriesValue,
+          referencePinceauxValue: old.referencePinceauxValue,
+          colorPrimary: old.colorPrimary,
+          materialNotes: old.materialNotes,
+          currentOwnerId: result['owner_id'] as String?,
+          creationDate: old.creationDate,
+          artistNote: old.artistNote,
+          photoUrl: old.photoUrl,
+        );
+        notifyListeners();
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> loadMyEggPieces() async {
+    try {
+      final data = await _api.getList('/egg-identity/me');
+      final dir = await getApplicationDocumentsDirectory();
+      final cacheDir = '${dir.path}/egg_faces';
+      await Directory(cacheDir).create(recursive: true);
+
+      final List<Piece> loaded = [];
+      for (final j in data) {
+        final m = j as Map<String, dynamic>;
+        final serverId = m['id'] as String;
+        String? localPath;
+
+        if (m['has_face_photo'] == true) {
+          final cachedFile = '$cacheDir/$serverId.jpg';
+          if (await File(cachedFile).exists()) {
+            localPath = cachedFile;
+          } else {
+            try {
+              final detail = await _api.get('/egg-identity/$serverId');
+              final b64 = detail['face_photo'] as String?;
+              if (b64 != null && b64.isNotEmpty) {
+                await File(cachedFile).writeAsBytes(base64Decode(b64));
+                localPath = cachedFile;
+              }
+            } catch (_) {}
+          }
+        }
+
+        loaded.add(_eggToPiece(m, localPhotoPath: localPath));
+      }
+      _myPieces = loaded;
+      notifyListeners();
+    } catch (_) {}
   }
 
   // -- Server pieces (art pieces, not eggs) ---------------------------------

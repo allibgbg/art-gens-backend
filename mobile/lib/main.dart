@@ -7,6 +7,9 @@ import 'services/auth_service.dart';
 import 'providers/auth_provider.dart';
 import 'providers/pieces_provider.dart';
 import 'providers/trade_provider.dart';
+import 'providers/egg_offers_provider.dart';
+import 'providers/notifications_provider.dart';
+import 'providers/messages_provider.dart';
 import 'providers/backend_status.dart';
 import 'screens/login_screen.dart';
 import 'screens/onboarding_screen.dart';
@@ -15,6 +18,10 @@ import 'screens/piece_detail_screen.dart';
 import 'screens/make_offer_screen.dart';
 import 'screens/rotation_scan_screen.dart';
 import 'screens/trade_window_screen.dart';
+import 'screens/egg_exchange_screen.dart';
+import 'screens/egg_detail_screen.dart';
+import 'screens/notifications_screen.dart';
+import 'screens/messages_screen.dart';
 import 'services/debug_console.dart';
 import 'services/error_reporter.dart';
 
@@ -62,6 +69,9 @@ class ArtGensApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => AuthProvider(authService, apiClient)),
         ChangeNotifierProvider(create: (_) => PiecesProvider(apiClient)),
         ChangeNotifierProvider(create: (_) => TradeProvider(apiClient)),
+        ChangeNotifierProvider(create: (_) => EggOffersProvider(apiClient)),
+        ChangeNotifierProvider(create: (_) => NotificationsProvider(apiClient)),
+        ChangeNotifierProvider(create: (_) => MessagesProvider(apiClient)),
         ChangeNotifierProvider.value(value: debugConsole),
       ],
       child: SleepingOverlay(
@@ -99,6 +109,30 @@ class ArtGensApp extends StatelessWidget {
       case '/trade':
         return MaterialPageRoute(
           builder: (_) => TradeWindowScreen(tradeSessionId: settings.arguments as String),
+        );
+      case '/egg-exchange':
+        final args = settings.arguments as Map<String, dynamic>;
+        return MaterialPageRoute(
+          builder: (_) => EggExchangeScreen(
+            targetEggId: args['targetEggId'] as String,
+            targetEggDisplay: args['targetEggDisplay'] as String,
+          ),
+        );
+      case '/egg-detail':
+        return MaterialPageRoute(
+          builder: (_) => EggDetailScreen(eggId: settings.arguments as String),
+        );
+      case '/notifications':
+        return MaterialPageRoute(
+          builder: (_) => const NotificationsScreen(),
+        );
+      case '/messages':
+        final args = settings.arguments as Map<String, dynamic>;
+        return MaterialPageRoute(
+          builder: (_) => MessagesScreen(
+            offerId: args['offerId'] as String,
+            offerTitle: args['offerTitle'] as String,
+          ),
         );
       default:
         return null;

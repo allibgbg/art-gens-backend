@@ -15,5 +15,6 @@ class EggIdentity(Base):
     notes = Column(Text, nullable=True)
     face_photo = Column(Text, nullable=True)  # base64 JPEG
     identity_data = Column(JSON, nullable=False)  # {version, image_w, image_h, quality, points: [...]}
+    current_owner_id = Column(String(36), nullable=True)  # user id du propriétaire
     created_at = Column(DateTime, default=datetime.utcnow)
     created_by = Column(String(36), nullable=True)  # user id

@@ -8,8 +8,8 @@ import 'package:provider/provider.dart';
 import '../config.dart';
 import '../providers/auth_provider.dart';
 import '../providers/pieces_provider.dart';
+import '../providers/notifications_provider.dart';
 import '../models/piece.dart';
-import '../services/egg_base_identity.dart';
 import 'egg_base_scan_screen.dart';
 import 'egg_verify_screen.dart';
 
@@ -31,9 +31,46 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<NotificationsProvider>().loadNotifications();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final isAdmin = context.watch<AuthProvider>().isAdmin;
+    final unreadCount = context.watch<NotificationsProvider>().unreadCount;
     return Scaffold(
+      appBar: AppBar(
+        actions: [
+          Stack(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.notifications_outlined),
+                onPressed: () => Navigator.pushNamed(context, '/notifications'),
+              ),
+              if (unreadCount > 0)
+                Positioned(
+                  right: 8,
+                  top: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(
+                      color: Colors.red,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      unreadCount > 9 ? '9+' : '$unreadCount',
+                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
       body: _screens[_currentIndex],
       floatingActionButton: FloatingActionButton.small(
         onPressed: () => Navigator.pushNamed(context, '/first-scan'),
@@ -69,6 +106,7 @@ class _CollectionTabState extends State<_CollectionTab> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<PiecesProvider>().loadMyPieces();
+      context.read<PiecesProvider>().loadMyEggPieces();
       context.read<PiecesProvider>().loadEggIdentities();
     });
   }
@@ -185,33 +223,77 @@ class _ExploreTabState extends State<_ExploreTab> {
         builder: (_, provider, __) {
           final eggs = provider.eggPieces;
           if (eggs.isEmpty) {
-            return const Center(child: Text('Aucun œuf répertorié'));
+            return const Center(child: Text('Aucune pierre répertoriée'));
           }
           return RefreshIndicator(
             onRefresh: () => provider.loadEggIdentities(),
-            child: ListView.builder(
+            child: GridView.builder(
               padding: const EdgeInsets.all(8),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                childAspectRatio: 0.75,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+              ),
               itemCount: eggs.length,
               itemBuilder: (_, i) {
                 final piece = eggs[i];
                 final hasPhoto = piece.photoUrl != null &&
                     (piece.photoUrl!.startsWith('/') || piece.photoUrl!.contains('\\'));
                 final name = piece.materialNotes;
-                return ListTile(
-                  leading: hasPhoto
-                      ? CircleAvatar(backgroundImage: FileImage(File(piece.photoUrl!)))
-                      : CircleAvatar(
-                          backgroundColor: _colorFromString(piece.colorPrimary),
-                          child: Text(piece.seriesValue.toString()),
+                return Card(
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => Navigator.pushNamed(
+                      context,
+                      '/egg-detail',
+                      arguments: piece.id,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(
+                          child: hasPhoto
+                              ? Image.file(
+                                  File(piece.photoUrl!),
+                                  fit: BoxFit.cover,
+                                )
+                              : Container(
+                                  color: Colors.purple.shade200,
+                                  child: Center(
+                                    child: Text(
+                                      piece.displayNumber,
+                                      style: const TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
                         ),
-                  title: Text(name != null && name.isNotEmpty
-                      ? '${piece.displayNumber.split('-').last}-$name'
-                      : piece.displayNumber),
-                  subtitle: Text('Série ${piece.seriesValue} — ${piece.referencePinceauxValue} 🖌'),
-                  onTap: () => Navigator.pushNamed(
-                    context,
-                    '/piece-detail',
-                    arguments: piece.id,
+                        Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                name != null && name.isNotEmpty
+                                    ? '${piece.displayNumber.split('-').last}-$name'
+                                    : piece.displayNumber,
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                'Série ${piece.seriesValue} — ${piece.referencePinceauxValue} 🖌',
+                                style: TextStyle(color: Colors.grey[600], fontSize: 11),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               },
@@ -410,57 +492,14 @@ class _LocalEggEditScreenState extends State<_LocalEggEditScreen> {
   }
 
   Future<void> _retakeFacePhoto() async {
-    try {
-      final cameras = await availableCameras();
-      final cam = cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
-        orElse: () => cameras.first,
-      );
-      final controller = CameraController(cam, ResolutionPreset.high);
-      await controller.initialize();
-      await controller.setFocusPoint(const Offset(0.5, 0.5));
-
-      final xfile = await controller.takePicture();
-      await controller.dispose();
-
-      final bytes = await File(xfile.path).readAsBytes();
-      final colorMat = cv.imdecode(bytes, 1);
-      if (colorMat.cols <= 0) return;
-
-      final cropped = cropEgg(colorMat);
-      colorMat.dispose();
-
-      // Save locally
-      final dir = await getApplicationDocumentsDirectory();
-      final cacheDir = Directory('${dir.path}/egg_faces');
-      await cacheDir.create(recursive: true);
-      final serverId = widget.piece.id.replaceFirst('egg_', '');
-      final localPath = '${cacheDir.path}/$serverId.jpg';
-      cv.imwrite(localPath, cropped);
-      cropped.dispose();
-
-      // Read back as base64 for server upload
-      final jpgBytes = await File(localPath).readAsBytes();
-      final b64 = base64Encode(jpgBytes);
-
-      // Upload to server + update local cache
-      if (mounted) {
-        await context.read<PiecesProvider>().updateEggIdentity(
-          widget.piece.id,
-          facePhoto: b64,
-          localPhotoPath: localPath,
-        );
-        setState(() => _hasPhoto = true);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Photo de face remplacée')),
-          );
-        }
-      }
-    } catch (e) {
+    final result = await Navigator.push<String>(context,
+      MaterialPageRoute(builder: (_) => _RetakeFacePhotoScreen(pieceId: widget.piece.id)),
+    );
+    if (result != null && mounted) {
+      setState(() => _hasPhoto = true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erreur: $e')),
+          const SnackBar(content: Text('Photo de face remplacée')),
         );
       }
     }
@@ -605,6 +644,233 @@ class _LocalEggEditScreenState extends State<_LocalEggEditScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RetakeFacePhotoScreen extends StatefulWidget {
+  final String pieceId;
+  const _RetakeFacePhotoScreen({required this.pieceId});
+
+  @override
+  State<_RetakeFacePhotoScreen> createState() => _RetakeFacePhotoScreenState();
+}
+
+class _RetakeFacePhotoScreenState extends State<_RetakeFacePhotoScreen> {
+  CameraController? _controller;
+  bool _ready = false;
+  bool _busy = false;
+  String? _facePhotoPath;
+  String? _dir;
+  double _currentZoom = 1.0;
+  double _maxZoom = 5.0;
+  double _zoomAtGestureStart = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    try {
+      final cameras = await availableCameras();
+      final cam = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      _controller = CameraController(cam, ResolutionPreset.high, enableAudio: false);
+      await _controller!.initialize();
+      try {
+        _maxZoom = await _controller!.getMaxZoomLevel();
+        await _controller!.setZoomLevel(1.0);
+        await _controller!.setFocusPoint(const Offset(0.5, 0.5));
+      } catch (_) {}
+      final dir = await getApplicationDocumentsDirectory();
+      _dir = dir.path;
+      if (mounted) setState(() => _ready = true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur caméra: $e')),
+        );
+        Navigator.pop(context);
+      }
+    }
+  }
+
+  Future<void> _captureFace() async {
+    if (_busy || _controller == null || !_controller!.value.isInitialized) return;
+    setState(() => _busy = true);
+
+    try {
+      final streaming = _controller!.value.isStreamingImages;
+      if (streaming) await _controller!.stopImageStream();
+
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final xfile = await _controller!.takePicture();
+      final bytes = await xfile.readAsBytes();
+
+      final colorMat = cv.imdecode(bytes, 1);
+      if (colorMat.cols <= 0 || colorMat.rows <= 0) {
+        _busy = false;
+        return;
+      }
+
+      final cropped = cropEgg(colorMat);
+      colorMat.dispose();
+
+      final outPath = '$_dir/face_$ts.jpg';
+      cv.imwrite(outPath, cropped);
+      cropped.dispose();
+
+      if (mounted) setState(() { _facePhotoPath = outPath; _busy = false; });
+
+      if (_controller!.value.isInitialized && mounted) {
+        await _controller!.startImageStream((_) {});
+      }
+    } catch (e) {
+      _busy = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _save() async {
+    if (_facePhotoPath == null) return;
+    setState(() => _busy = true);
+
+    try {
+      final bytes = await File(_facePhotoPath!).readAsBytes();
+      final b64 = base64Encode(bytes);
+
+      // Save to egg_faces cache
+      final serverId = widget.pieceId.replaceFirst('egg_', '');
+      final cacheDir = Directory('${_dir!}/../egg_faces');
+      await cacheDir.create(recursive: true);
+      final localPath = '${cacheDir.path}/$serverId.jpg';
+      await File(_facePhotoPath!).copy(localPath);
+
+      // Upload to server
+      if (mounted) {
+        await context.read<PiecesProvider>().updateEggIdentity(
+          widget.pieceId,
+          facePhoto: b64,
+          localPhotoPath: localPath,
+        );
+        Navigator.pop(context, localPath);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_ready || _controller == null) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          GestureDetector(
+            onScaleStart: (details) {
+              _zoomAtGestureStart = _currentZoom;
+            },
+            onScaleUpdate: (details) {
+              final newZoom = (_zoomAtGestureStart * details.scale).clamp(1.0, _maxZoom);
+              _currentZoom = newZoom;
+              _controller?.setZoomLevel(newZoom);
+            },
+            child: CameraPreview(_controller!),
+          ),
+          // Rectangle guide
+          Center(
+            child: Container(
+              width: 220,
+              height: 300,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white70, width: 2),
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+          ),
+          // Instructions
+          Positioned(
+            top: 16, left: 16, right: 16,
+            child: Card(
+              color: Colors.black54,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  _facePhotoPath == null
+                      ? 'Cadrez l\'œuf de face.\nCette photo servira d\'image à la fiche.'
+                      : 'Photo capturée ! Appuyez "Enregistrer".',
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ),
+          // Preview thumbnail
+          if (_facePhotoPath != null)
+            Positioned(
+              top: 80, right: 16,
+              child: Container(
+                width: 80, height: 80,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green, width: 2),
+                  image: DecorationImage(
+                    image: FileImage(File(_facePhotoPath!)),
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              ),
+            ),
+          // Buttons
+          Positioned(
+            bottom: 32, left: 0, right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (!_busy)
+                  FloatingActionButton(
+                    onPressed: _captureFace,
+                    backgroundColor: Colors.white,
+                    child: Icon(Icons.camera, color: Theme.of(context).primaryColor),
+                  ),
+                if (_busy)
+                  const CircularProgressIndicator(color: Colors.white),
+                if (_facePhotoPath != null) ...[
+                  const SizedBox(width: 24),
+                  FloatingActionButton.extended(
+                    onPressed: _save,
+                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    icon: const Icon(Icons.check, color: Colors.white),
+                    label: const Text('Enregistrer', style: TextStyle(color: Colors.white)),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
