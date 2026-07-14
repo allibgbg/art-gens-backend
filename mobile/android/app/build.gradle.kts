@@ -5,6 +5,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val isAdminBuild = project.findProperty("adminBuild")?.toString()?.toBoolean() == true
+
 android {
     namespace = "com.artgens.art_gens"
     compileSdk = flutter.compileSdkVersion
@@ -20,10 +22,8 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.artgens.art_gens"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        applicationId = if (isAdminBuild) "com.artgens.admin_gens" else "com.artgens.art_gens"
+        resValue("string", "app_name", if (isAdminBuild) "ADMIN GENS" else "ART GENS")
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
